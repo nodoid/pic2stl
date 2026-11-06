@@ -1,0 +1,30 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Rider / Visual Studio
+.idea/
+.vs/
+*.user
+*.suo
+*.userprefs
+
+# Test and coverage artifacts
+TestResults/
+*.trx
+coverage*.xml
+coverage*.json
+
+# Apple build and signing byproducts
+*.ipa
+*.dSYM/
+*.xcarchive
+*.mobileprovision
+
+# Downloaded AI weights (fetched at runtime, never committed)
+*.onnx
+
+# macOS
+.DS_Store

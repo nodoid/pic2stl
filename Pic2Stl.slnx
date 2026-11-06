@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Pic2Stl.Core/Pic2Stl.Core.csproj" />
+    <Project Path="src/Pic2Stl/Pic2Stl.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Pic2Stl.Tests/Pic2Stl.Tests.csproj" />
+  </Folder>
+</Solution>

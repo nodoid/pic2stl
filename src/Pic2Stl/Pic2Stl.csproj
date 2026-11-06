@@ -1,0 +1,97 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<!-- Android 12L (API 32) and iOS 18 minimums; compiled against Android 36 / iOS 27.1 SDKs. -->
+		<TargetFrameworks>net10.0-android36.0;net10.0-ios27.1</TargetFrameworks>
+
+		<OutputType>Exe</OutputType>
+		<RootNamespace>Pic2Stl</RootNamespace>
+		<UseMaui>true</UseMaui>
+		<SingleProject>true</SingleProject>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+
+		<MauiXamlInflator>SourceGen</MauiXamlInflator>
+
+		<!-- Display name -->
+		<ApplicationTitle>Pic2Stl</ApplicationTitle>
+
+		<!-- App Identifier (matches the devel-pic2stl provisioning profile) -->
+		<ApplicationId>uk.co.allthejohnsons.pic2stl</ApplicationId>
+
+		<!-- Versions -->
+		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+		<ApplicationVersion>1</ApplicationVersion>
+
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">18.0</SupportedOSPlatformVersion>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">32.0</SupportedOSPlatformVersion>
+
+		<!-- The installed .NET iOS pack recommends Xcode 27.1 but only Xcode 27.2 is available here. -->
+		<ValidateXcodeVersion>false</ValidateXcodeVersion>
+
+		<!-- ONNX Runtime ships a static xcframework; keep native symbols for the interpreter. -->
+		<MtouchLink Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">None</MtouchLink>
+
+		<!-- Device signing for Paul's iPhone. Profile devel-pic2stl = 7d44636b-f97a-4431-9b5a-1ccb7e859a99. -->
+		<CodesignKey Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">Apple Development: Created via API (ZTRSB8B479)</CodesignKey>
+		<CodesignProvision Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">devel-pic2stl</CodesignProvision>
+		<CodesignTeamId Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">3UH7BE38T3</CodesignTeamId>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<!-- App Icon -->
+		<MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.svg" Color="#512BD4" />
+
+		<!-- Splash Screen -->
+		<MauiSplashScreen Include="Resources\Splash\splash.svg" Color="#512BD4" BaseSize="128,128" />
+
+		<!-- Images -->
+		<MauiImage Include="Resources\Images\*" />
+
+		<!-- Custom Fonts -->
+		<MauiFont Include="Resources\Fonts\*" />
+
+		<!-- Raw Assets (also remove the "Resources\Raw" prefix) -->
+		<MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
+		<PackageReference Include="Plugin.ProgressViews" Version="1.0.1" />
+		<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.31.1" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Pic2Stl.Core\Pic2Stl.Core.csproj" />
+	</ItemGroup>
+
+	<!--
+		ONNX Runtime's static iOS framework uses sqlite3 (from its CoreML/protobuf support) and expects the
+		host to provide RegisterCustomOps. Link the system library and a stub compiled below.
+	-->
+	<ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
+		<LinkerArgument Include="-lsqlite3" />
+	</ItemGroup>
+
+	<Target Name="CompileOnnxCustomOpsStub"
+	        BeforeTargets="_ComputeLinkNativeExecutableInputs"
+	        Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
+		<PropertyGroup>
+			<_OnnxStubSource>$(MSBuildProjectDirectory)/Platforms/iOS/OnnxCustomOpsStub.c</_OnnxStubSource>
+			<_OnnxStubObject>$(IntermediateOutputPath)OnnxCustomOpsStub.o</_OnnxStubObject>
+			<_OnnxStubSdk Condition="'$(RuntimeIdentifier)' == 'iossimulator-x64'">iphonesimulator</_OnnxStubSdk>
+			<_OnnxStubTarget Condition="'$(RuntimeIdentifier)' == 'iossimulator-x64'">x86_64-apple-ios18.0-simulator</_OnnxStubTarget>
+			<_OnnxStubSdk Condition="'$(RuntimeIdentifier)' == 'iossimulator-arm64'">iphonesimulator</_OnnxStubSdk>
+			<_OnnxStubTarget Condition="'$(RuntimeIdentifier)' == 'iossimulator-arm64'">arm64-apple-ios18.0-simulator</_OnnxStubTarget>
+			<_OnnxStubSdk Condition="'$(_OnnxStubSdk)' == ''">iphoneos</_OnnxStubSdk>
+			<_OnnxStubTarget Condition="'$(_OnnxStubTarget)' == ''">arm64-apple-ios18.0</_OnnxStubTarget>
+		</PropertyGroup>
+		<Exec Command="xcrun --sdk $(_OnnxStubSdk) clang -target $(_OnnxStubTarget) -c &quot;$(_OnnxStubSource)&quot; -o &quot;$(_OnnxStubObject)&quot;"
+		      Condition="!Exists('$(_OnnxStubObject)')" />
+		<ItemGroup>
+			<LinkerArgument Include="$(_OnnxStubObject)" />
+		</ItemGroup>
+	</Target>
+
+</Project>
