@@ -4,7 +4,10 @@ using Pic2Stl.Core.Imaging;
 
 namespace Pic2Stl.Tests;
 
-/// <summary>Builds PNGs for the decoder tests. Filter 0 (none) and 2 (up) cover the cases the platforms emit.</summary>
+/// <summary>
+/// Builds PNGs for the decoder tests. All five row filters are supported so filtered rows are exercised, and
+/// packed (1, 2 and 4-bit) samples are written most significant bits first, as the format requires.
+/// </summary>
 internal static class TestPng
 {
     private static readonly byte[] Signature = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -21,12 +24,11 @@ internal static class TestPng
             _ => throw new ArgumentOutOfRangeException(nameof(colourType)),
         };
 
-        if (bitDepth is not (8 or 16))
+        if (bitDepth is not (1 or 2 or 4 or 8 or 16))
             throw new ArgumentOutOfRangeException(nameof(bitDepth));
 
-        var bytesPerSample = bitDepth / 8;
-        var bytesPerPixel = channels * bytesPerSample;
-        var stride = image.Width * bytesPerPixel;
+        var bitsPerPixel = channels * bitDepth;
+        var stride = (image.Width * bitsPerPixel + 7) / 8;
         var samples = new byte[image.Height * stride];
 
         byte Source(int x, int y, int channel)
@@ -45,40 +47,134 @@ internal static class TestPng
             for (var x = 0; x < image.Width; x++)
                 for (var c = 0; c < channels; c++)
                 {
-                    var offset = y * stride + (x * channels + c) * bytesPerSample;
-                    samples[offset] = Source(x, y, c);
+                    var value = Source(x, y, c);
 
-                    if (bytesPerSample == 2)
-                        samples[offset + 1] = lowByte;
+                    // Packed depths hold a reduced range, so quantise the 8-bit colour to the samples' steps.
+                    if (bitDepth < 8)
+                        value = (byte)(value * ((1 << bitDepth) - 1) / 255);
+
+                    WriteSample(samples, y * stride, x * channels + c, bitDepth, value, lowByte);
                 }
 
-        var raw = new byte[image.Height * (stride + 1)];
+        var raw = FilterRows(samples, image.Height, stride, filter, Math.Max(1, bitsPerPixel / 8));
+        return Assemble(image.Width, image.Height, bitDepth, colourType, raw, null, null);
+    }
 
-        for (var y = 0; y < image.Height; y++)
+    /// <summary>Builds a palette (colour type 3) PNG from one index per pixel.</summary>
+    public static byte[] EncodePalette(
+        int width,
+        int height,
+        byte[] indices,
+        int bitDepth,
+        byte[]? palette,
+        byte[]? alpha = null,
+        int filter = 0)
+    {
+        if (indices.Length != width * height)
+            throw new ArgumentException("One index per pixel is required.", nameof(indices));
+
+        var stride = (width * bitDepth + 7) / 8;
+        var samples = new byte[height * stride];
+
+        for (var y = 0; y < height; y++)
+            for (var x = 0; x < width; x++)
+                WriteSample(samples, y * stride, x, bitDepth, indices[y * width + x], 0);
+
+        var raw = FilterRows(samples, height, stride, filter, 1);
+        return Assemble(width, height, bitDepth, 3, raw, palette, alpha);
+    }
+
+    private static void WriteSample(byte[] row, int rowStart, int sampleIndex, int bitDepth, byte value, byte lowByte)
+    {
+        switch (bitDepth)
         {
-            var rowStart = y * (stride + 1);
-            raw[rowStart] = (byte)filter;
+            case 8:
+                row[rowStart + sampleIndex] = value;
+                return;
+
+            case 16:
+                row[rowStart + sampleIndex * 2] = value;
+                row[rowStart + sampleIndex * 2 + 1] = lowByte;
+                return;
+
+            default:
+                var bitOffset = sampleIndex * bitDepth;
+                var shift = 8 - bitDepth - (bitOffset & 7);
+                row[rowStart + (bitOffset >> 3)] |= (byte)((value & ((1 << bitDepth) - 1)) << shift);
+                return;
+        }
+    }
+
+    private static byte[] FilterRows(byte[] samples, int height, int stride, int filter, int bytesPerPixel)
+    {
+        var raw = new byte[height * (stride + 1)];
+
+        for (var y = 0; y < height; y++)
+        {
+            var rowStart = y * stride;
+            var outputStart = y * (stride + 1);
+            raw[outputStart] = (byte)filter;
 
             for (var i = 0; i < stride; i++)
             {
-                var value = samples[y * stride + i];
-                var stored = filter == 2 && y > 0
-                    ? (byte)(value - samples[(y - 1) * stride + i])
-                    : value;
+                var value = samples[rowStart + i];
+                var left = i >= bytesPerPixel ? samples[rowStart + i - bytesPerPixel] : 0;
+                var up = y > 0 ? samples[rowStart - stride + i] : 0;
+                var upLeft = y > 0 && i >= bytesPerPixel ? samples[rowStart - stride + i - bytesPerPixel] : 0;
 
-                raw[rowStart + 1 + i] = stored;
+                var stored = filter switch
+                {
+                    0 => value,
+                    1 => (byte)(value - left),
+                    2 => (byte)(value - up),
+                    3 => (byte)(value - ((left + up) >> 1)),
+                    4 => (byte)(value - Paeth(left, up, upLeft)),
+                    _ => throw new ArgumentOutOfRangeException(nameof(filter)),
+                };
+
+                raw[outputStart + 1 + i] = stored;
             }
         }
 
+        return raw;
+    }
+
+    private static int Paeth(int a, int b, int c)
+    {
+        var p = a + b - c;
+        var pa = Math.Abs(p - a);
+        var pb = Math.Abs(p - b);
+        var pc = Math.Abs(p - c);
+
+        if (pa <= pb && pa <= pc)
+            return a;
+        return pb <= pc ? b : c;
+    }
+
+    private static byte[] Assemble(
+        int width,
+        int height,
+        int bitDepth,
+        int colourType,
+        byte[] raw,
+        byte[]? palette,
+        byte[]? paletteAlpha)
+    {
         using var output = new MemoryStream();
         output.Write(Signature);
 
         var header = new byte[13];
-        WriteBigEndian(header, 0, (uint)image.Width);
-        WriteBigEndian(header, 4, (uint)image.Height);
+        WriteBigEndian(header, 0, (uint)width);
+        WriteBigEndian(header, 4, (uint)height);
         header[8] = (byte)bitDepth;
         header[9] = (byte)colourType;
         WriteChunk(output, "IHDR", header);
+
+        if (palette is not null)
+            WriteChunk(output, "PLTE", palette);
+
+        if (paletteAlpha is not null)
+            WriteChunk(output, "tRNS", paletteAlpha);
 
         using (var compressed = new MemoryStream())
         {

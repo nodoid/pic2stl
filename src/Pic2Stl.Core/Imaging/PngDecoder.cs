@@ -1,17 +1,24 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
-using Pic2Stl.Core.Imaging;
 
 namespace Pic2Stl.Core.Imaging;
 
 /// <summary>
-/// Minimal PNG reader for the non-interlaced images the platform photo decoders produce. 8-bit and 16-bit
-/// samples are accepted; 16-bit ones are reduced to 8 bits, which is all the AI input needs.
+/// Minimal PNG reader for the non-interlaced images the platform photo decoders produce. Every standard colour
+/// type and bit depth is accepted: 1, 2 and 4-bit greyscale and palette samples are expanded to 8 bits, 16-bit
+/// samples are reduced to 8 bits, and palette images are looked up through their PLTE (and optional tRNS) chunk.
+/// Anything it cannot read throws <see cref="InvalidDataException"/> saying what is wrong.
 /// Decoding in shared code keeps the AI input identical on iOS and Android and makes it testable.
 /// </summary>
 public static class PngDecoder
 {
     private static readonly byte[] Signature = [137, 80, 78, 71, 13, 10, 26, 10];
+
+    private const int ColourTypeGreyscale = 0;
+    private const int ColourTypeRgb = 2;
+    private const int ColourTypePalette = 3;
+    private const int ColourTypeGreyscaleAlpha = 4;
+    private const int ColourTypeRgba = 6;
 
     public static ImageData Decode(byte[] png)
     {
@@ -22,10 +29,12 @@ public static class PngDecoder
     public static ImageData Decode(ReadOnlySpan<byte> png)
     {
         if (png.Length < Signature.Length || !png[..Signature.Length].SequenceEqual(Signature))
-            throw new InvalidDataException("Not a PNG file.");
+            throw new InvalidDataException("This file is not a PNG image.");
 
         var offset = Signature.Length;
         int width = 0, height = 0, bitDepth = 0, colourType = -1, interlace = 0;
+        byte[]? palette = null;
+        byte[]? paletteAlpha = null;
         using var compressed = new MemoryStream();
         var seenHeader = false;
 
@@ -36,7 +45,7 @@ public static class PngDecoder
             var dataStart = offset + 8;
 
             if (length < 0 || dataStart + length + 4 > png.Length)
-                throw new InvalidDataException($"PNG chunk '{type}' is truncated.");
+                throw new InvalidDataException($"The PNG '{type}' chunk is truncated.");
 
             var data = png.Slice(dataStart, length);
 
@@ -44,16 +53,24 @@ public static class PngDecoder
             {
                 case "IHDR":
                     if (length < 13)
-                        throw new InvalidDataException("PNG header is too short.");
+                        throw new InvalidDataException("The PNG header is too short.");
 
                     width = (int)BinaryPrimitives.ReadUInt32BigEndian(data[..4]);
                     height = (int)BinaryPrimitives.ReadUInt32BigEndian(data[4..8]);
                     bitDepth = data[8];
                     colourType = data[9];
                     if (data[10] != 0 || data[11] != 0)
-                        throw new InvalidDataException("Unsupported PNG compression or filter method.");
+                        throw new InvalidDataException("The PNG uses an unsupported compression or filter method.");
                     interlace = data[12];
                     seenHeader = true;
+                    break;
+
+                case "PLTE":
+                    palette = data.ToArray();
+                    break;
+
+                case "tRNS":
+                    paletteAlpha = data.ToArray();
                     break;
 
                 case "IDAT":
@@ -69,35 +86,65 @@ public static class PngDecoder
         }
 
         if (!seenHeader)
-            throw new InvalidDataException("PNG has no IHDR chunk.");
+            throw new InvalidDataException("The PNG has no header (IHDR chunk).");
 
-        if (bitDepth is not (8 or 16))
-            throw new InvalidDataException($"Only 8-bit and 16-bit PNGs are supported, got {bitDepth} bit.");
+        if (width < 1 || height < 1)
+            throw new InvalidDataException($"The PNG reports an invalid size of {width}x{height} pixels.");
 
         if (interlace != 0)
-            throw new InvalidDataException("Interlaced PNGs are not supported.");
+            throw new InvalidDataException("The PNG is interlaced (Adam7), which is not supported.");
 
         var channels = colourType switch
         {
-            0 => 1, // greyscale
-            2 => 3, // RGB
-            4 => 2, // greyscale + alpha
-            6 => 4, // RGBA
-            _ => throw new InvalidDataException($"Unsupported PNG colour type {colourType}."),
+            ColourTypeGreyscale => 1,
+            ColourTypeRgb => 3,
+            ColourTypePalette => 1, // a single palette index per pixel
+            ColourTypeGreyscaleAlpha => 2,
+            ColourTypeRgba => 4,
+            _ => 0,
         };
 
-        if (width < 1 || height < 1)
-            throw new InvalidDataException("PNG has invalid dimensions.");
+        if (channels == 0)
+            throw new InvalidDataException($"The PNG uses colour type {colourType}, which is not a defined PNG colour type.");
 
-        // 16-bit samples are two big-endian bytes each; filtering works byte by byte either way.
-        var bytesPerSample = bitDepth / 8;
-        var bytesPerPixel = channels * bytesPerSample;
-        var stride = width * bytesPerPixel;
+        // The spec allows only certain depths per colour type.
+        int[] allowedDepths = colourType switch
+        {
+            ColourTypeGreyscale => [1, 2, 4, 8, 16],
+            ColourTypePalette => [1, 2, 4, 8],
+            _ => [8, 16],
+        };
+
+        if (Array.IndexOf(allowedDepths, bitDepth) < 0)
+            throw new InvalidDataException(
+                $"The PNG stores {bitDepth}-bit samples, which is not valid for colour type {colourType} " +
+                $"(allowed: {string.Join(", ", allowedDepths)}-bit).");
+
+        if (colourType == ColourTypePalette)
+        {
+            if (palette is null)
+                throw new InvalidDataException("The PNG is palette-based but has no palette (PLTE chunk).");
+
+            if (palette.Length == 0 || palette.Length % 3 != 0)
+                throw new InvalidDataException("The PNG palette (PLTE chunk) is malformed.");
+        }
+
+        // Samples sit at 1, 2, 4, 8 or 16 bits each; a row is whole bytes, padded at the right-hand end.
+        var bitsPerPixel = channels * bitDepth;
+        var stride = (width * bitsPerPixel + 7) / 8;
+
+        // Filters work on the bytes of a row and step back by whole pixels, which rounded up is never zero.
+        var filterBytesPerPixel = Math.Max(1, bitsPerPixel / 8);
+
         var raw = new byte[height * (stride + 1)];
 
+        if (compressed.Length == 0)
+            throw new InvalidDataException("The PNG has no image data (IDAT chunk).");
+
         compressed.Position = 0;
-        using (var zlib = new ZLibStream(compressed, CompressionMode.Decompress))
+        try
         {
+            using var zlib = new ZLibStream(compressed, CompressionMode.Decompress);
             var read = 0;
             while (read < raw.Length)
             {
@@ -108,35 +155,62 @@ public static class PngDecoder
             }
 
             if (read != raw.Length)
-                throw new InvalidDataException("PNG image data is shorter than expected.");
+                throw new InvalidDataException("The PNG image data is shorter than its header says.");
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new InvalidDataException($"The PNG image data is corrupt: {ex.Message}", ex);
         }
 
         var pixels = new byte[width * height * 4];
         var previous = new byte[stride];
         var current = new byte[stride];
+        var paletteEntries = palette is null ? 0 : palette.Length / 3;
 
         for (var y = 0; y < height; y++)
         {
             var rowStart = y * (stride + 1);
             var filter = raw[rowStart];
             Buffer.BlockCopy(raw, rowStart + 1, current, 0, stride);
-            Unfilter(filter, current, previous, bytesPerPixel);
+            Unfilter(filter, current, previous, filterBytesPerPixel);
 
             for (var x = 0; x < width; x++)
             {
                 var i = (y * width + x) * 4;
-                var s = x * bytesPerPixel;
+                var first = x * channels;
 
-                // For 16-bit samples the high byte is the 8-bit value, so reading it truncates correctly.
-                var red = current[s];
-                var green = channels >= 3 ? current[s + bytesPerSample] : red;
-                var blue = channels >= 3 ? current[s + 2 * bytesPerSample] : red;
-                var alpha = channels switch
+                byte red, green, blue, alpha;
+
+                if (colourType == ColourTypePalette)
                 {
-                    2 => current[s + bytesPerSample],
-                    4 => current[s + 3 * bytesPerSample],
-                    _ => (byte)255,
-                };
+                    var index = ReadSample(current, first, bitDepth);
+
+                    if (index < paletteEntries)
+                    {
+                        red = palette![index * 3];
+                        green = palette[index * 3 + 1];
+                        blue = palette[index * 3 + 2];
+                    }
+                    else
+                    {
+                        // An out-of-range index is invalid; draw it black rather than failing the whole photo.
+                        red = green = blue = 0;
+                    }
+
+                    alpha = paletteAlpha is not null && index < paletteAlpha.Length ? paletteAlpha[index] : (byte)255;
+                }
+                else
+                {
+                    red = ToByte(ReadSample(current, first, bitDepth), bitDepth);
+                    green = channels >= 3 ? ToByte(ReadSample(current, first + 1, bitDepth), bitDepth) : red;
+                    blue = channels >= 3 ? ToByte(ReadSample(current, first + 2, bitDepth), bitDepth) : red;
+                    alpha = channels switch
+                    {
+                        2 => ToByte(ReadSample(current, first + 1, bitDepth), bitDepth),
+                        4 => ToByte(ReadSample(current, first + 3, bitDepth), bitDepth),
+                        _ => (byte)255,
+                    };
+                }
 
                 pixels[i] = red;
                 pixels[i + 1] = green;
@@ -149,6 +223,28 @@ public static class PngDecoder
 
         return new ImageData(width, height, pixels);
     }
+
+    /// <summary>Reads one sample, most significant bits first. 16-bit samples give their high byte.</summary>
+    private static int ReadSample(byte[] row, int sampleIndex, int bitDepth)
+    {
+        switch (bitDepth)
+        {
+            case 8:
+                return row[sampleIndex];
+
+            case 16:
+                return row[sampleIndex * 2];
+
+            default:
+                var bitOffset = sampleIndex * bitDepth;
+                var mask = (1 << bitDepth) - 1;
+                return (row[bitOffset >> 3] >> (8 - bitDepth - (bitOffset & 7))) & mask;
+        }
+    }
+
+    /// <summary>Scales a sample to 0-255. Sub-byte depths spread their range over the full byte.</summary>
+    private static byte ToByte(int sample, int bitDepth) =>
+        bitDepth >= 8 ? (byte)sample : (byte)(sample * 255 / ((1 << bitDepth) - 1));
 
     private static void Unfilter(byte filter, byte[] current, byte[] previous, int bytesPerPixel)
     {
@@ -188,7 +284,7 @@ public static class PngDecoder
                 return;
 
             default:
-                throw new InvalidDataException($"Unsupported PNG row filter {filter}.");
+                throw new InvalidDataException($"The PNG uses unknown row filter {filter}.");
         }
     }
 

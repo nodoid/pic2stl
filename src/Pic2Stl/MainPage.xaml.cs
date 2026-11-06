@@ -45,7 +45,10 @@ public partial class MainPage : ContentPage
         }
         catch (Exception ex)
         {
-            await DisplayAlertAsync("Camera unavailable", ex.Message, "OK");
+            await DisplayAlertAsync(
+                "Camera unavailable",
+                $"The camera could not be opened. Check that Pic2Stl is allowed to use it in Settings, then try again.\n\n({ex.Message})",
+                "OK");
         }
     }
 
@@ -60,24 +63,49 @@ public partial class MainPage : ContentPage
         }
         catch (Exception ex)
         {
-            await DisplayAlertAsync("Photos unavailable", ex.Message, "OK");
+            await DisplayAlertAsync(
+                "Photos unavailable",
+                $"The photo library could not be opened. Check that Pic2Stl is allowed to use photos in Settings, then try again.\n\n({ex.Message})",
+                "OK");
         }
     }
 
     private async Task LoadPhotoAsync(FileResult file)
     {
+        GenerateButton.IsEnabled = false;
+        SetProgress(0, "Reading photo");
+
         try
         {
             await using var stream = await file.OpenReadAsync();
             _photo = await _photoDecoder.LoadAsync(stream);
 
             PhotoPreview.Source = ImageSource.FromStream(() => new MemoryStream(_photo.PreviewPng));
-            GenerateButton.IsEnabled = true;
             SetProgress(0, "Photo ready");
+        }
+        catch (OperationCanceledException)
+        {
+            // The picker was dismissed; leave whatever photo was already loaded alone.
+            SetProgress(0, _photo is null ? "Ready when you are" : "Photo ready");
+        }
+        catch (PhotoLoadException ex)
+        {
+            System.Diagnostics.Debug.WriteLine(ex);
+            SetProgress(0, _photo is null ? "No photo loaded" : "Photo ready");
+            await DisplayAlertAsync("Could not read that photo", ex.Message, "OK");
         }
         catch (Exception ex)
         {
-            await DisplayAlertAsync("Could not read that photo", ex.Message, "OK");
+            System.Diagnostics.Debug.WriteLine(ex);
+            SetProgress(0, _photo is null ? "No photo loaded" : "Photo ready");
+            await DisplayAlertAsync(
+                "Could not read that photo",
+                $"Something went wrong while reading that photo. Try another one.\n\n({ex.Message})",
+                "OK");
+        }
+        finally
+        {
+            GenerateButton.IsEnabled = _photo is not null;
         }
     }
 
