@@ -4,9 +4,10 @@ using System.IO.Compression;
 namespace Pic2Stl.Core.Imaging;
 
 /// <summary>
-/// Minimal PNG reader for the non-interlaced images the platform photo decoders produce. Every standard colour
-/// type and bit depth is accepted: 1, 2 and 4-bit greyscale and palette samples are expanded to 8 bits, 16-bit
-/// samples are reduced to 8 bits, and palette images are looked up through their PLTE (and optional tRNS) chunk.
+/// Minimal PNG reader for the images the platform photo decoders produce, plus anything else the format allows.
+/// Every standard colour type and bit depth is accepted: 1, 2 and 4-bit greyscale and palette samples are
+/// expanded to 8 bits, 16-bit samples are reduced to 8 bits, palette images are looked up through their PLTE
+/// (and optional tRNS) chunk, and Adam7 interlacing is reassembled into a plain raster.
 /// Anything it cannot read throws <see cref="InvalidDataException"/> saying what is wrong.
 /// Decoding in shared code keeps the AI input identical on iOS and Android and makes it testable.
 /// </summary>
@@ -91,9 +92,6 @@ public static class PngDecoder
         if (width < 1 || height < 1)
             throw new InvalidDataException($"The PNG reports an invalid size of {width}x{height} pixels.");
 
-        if (interlace != 0)
-            throw new InvalidDataException("The PNG is interlaced (Adam7), which is not supported.");
-
         var channels = colourType switch
         {
             ColourTypeGreyscale => 1,
@@ -131,12 +129,13 @@ public static class PngDecoder
 
         // Samples sit at 1, 2, 4, 8 or 16 bits each; a row is whole bytes, padded at the right-hand end.
         var bitsPerPixel = channels * bitDepth;
-        var stride = (width * bitsPerPixel + 7) / 8;
 
         // Filters work on the bytes of a row and step back by whole pixels, which rounded up is never zero.
         var filterBytesPerPixel = Math.Max(1, bitsPerPixel / 8);
 
-        var raw = new byte[height * (stride + 1)];
+        // An interlaced image is stored as seven sub-images, each coded like a whole image of its own.
+        var passes = BuildPasses(interlace, width, height, bitsPerPixel);
+        var raw = new byte[passes.Sum(pass => pass.Height * (pass.Stride + 1))];
 
         if (compressed.Length == 0)
             throw new InvalidDataException("The PNG has no image data (IDAT chunk).");
@@ -163,68 +162,114 @@ public static class PngDecoder
         }
 
         var pixels = new byte[width * height * 4];
-        var previous = new byte[stride];
-        var current = new byte[stride];
         var paletteEntries = palette is null ? 0 : palette.Length / 3;
 
-        for (var y = 0; y < height; y++)
+        // Writes one sample of an unfiltered row into the output raster, expanding it to 8-bit RGBA.
+        void Store(byte[] row, int column, int x, int y)
         {
-            var rowStart = y * (stride + 1);
-            var filter = raw[rowStart];
-            Buffer.BlockCopy(raw, rowStart + 1, current, 0, stride);
-            Unfilter(filter, current, previous, filterBytesPerPixel);
+            var first = column * channels;
 
-            for (var x = 0; x < width; x++)
+            byte red, green, blue, alpha;
+
+            if (colourType == ColourTypePalette)
             {
-                var i = (y * width + x) * 4;
-                var first = x * channels;
+                var index = ReadSample(row, first, bitDepth);
 
-                byte red, green, blue, alpha;
-
-                if (colourType == ColourTypePalette)
+                if (index < paletteEntries)
                 {
-                    var index = ReadSample(current, first, bitDepth);
-
-                    if (index < paletteEntries)
-                    {
-                        red = palette![index * 3];
-                        green = palette[index * 3 + 1];
-                        blue = palette[index * 3 + 2];
-                    }
-                    else
-                    {
-                        // An out-of-range index is invalid; draw it black rather than failing the whole photo.
-                        red = green = blue = 0;
-                    }
-
-                    alpha = paletteAlpha is not null && index < paletteAlpha.Length ? paletteAlpha[index] : (byte)255;
+                    red = palette![index * 3];
+                    green = palette[index * 3 + 1];
+                    blue = palette[index * 3 + 2];
                 }
                 else
                 {
-                    red = ToByte(ReadSample(current, first, bitDepth), bitDepth);
-                    green = channels >= 3 ? ToByte(ReadSample(current, first + 1, bitDepth), bitDepth) : red;
-                    blue = channels >= 3 ? ToByte(ReadSample(current, first + 2, bitDepth), bitDepth) : red;
-                    alpha = channels switch
-                    {
-                        2 => ToByte(ReadSample(current, first + 1, bitDepth), bitDepth),
-                        4 => ToByte(ReadSample(current, first + 3, bitDepth), bitDepth),
-                        _ => (byte)255,
-                    };
+                    // An out-of-range index is invalid; draw it black rather than failing the whole photo.
+                    red = green = blue = 0;
                 }
 
-                pixels[i] = red;
-                pixels[i + 1] = green;
-                pixels[i + 2] = blue;
-                pixels[i + 3] = alpha;
+                alpha = paletteAlpha is not null && index < paletteAlpha.Length ? paletteAlpha[index] : (byte)255;
+            }
+            else
+            {
+                red = ToByte(ReadSample(row, first, bitDepth), bitDepth);
+                green = channels >= 3 ? ToByte(ReadSample(row, first + 1, bitDepth), bitDepth) : red;
+                blue = channels >= 3 ? ToByte(ReadSample(row, first + 2, bitDepth), bitDepth) : red;
+                alpha = channels switch
+                {
+                    2 => ToByte(ReadSample(row, first + 1, bitDepth), bitDepth),
+                    4 => ToByte(ReadSample(row, first + 3, bitDepth), bitDepth),
+                    _ => (byte)255,
+                };
             }
 
-            (previous, current) = (current, previous);
+            var i = (y * width + x) * 4;
+            pixels[i] = red;
+            pixels[i + 1] = green;
+            pixels[i + 2] = blue;
+            pixels[i + 3] = alpha;
+        }
+
+        var cursor = 0;
+        foreach (var pass in passes)
+        {
+            var previous = new byte[pass.Stride];
+            var current = new byte[pass.Stride];
+
+            for (var row = 0; row < pass.Height; row++)
+            {
+                Buffer.BlockCopy(raw, cursor + 1, current, 0, pass.Stride);
+                Unfilter(raw[cursor], current, previous, filterBytesPerPixel);
+
+                for (var column = 0; column < pass.Width; column++)
+                    Store(current, column, pass.StartX + column * pass.StepX, pass.StartY + row * pass.StepY);
+
+                (previous, current) = (current, previous);
+                cursor += pass.Stride + 1;
+            }
         }
 
         return new ImageData(width, height, pixels);
     }
 
-    /// <summary>Reads one sample, most significant bits first. 16-bit samples give their high byte.</summary>
+    /// <summary>The seven Adam7 passes, as their first pixel and their step across and down the image.</summary>
+    private static readonly (int StartX, int StartY, int StepX, int StepY)[] Adam7 =
+    [
+        (0, 0, 8, 8),
+        (4, 0, 8, 8),
+        (0, 4, 4, 8),
+        (2, 0, 4, 4),
+        (0, 2, 2, 4),
+        (1, 0, 2, 2),
+        (0, 1, 1, 2),
+    ];
+
+    /// <summary>Describes the stored sub-images: one for a plain image, up to seven for an interlaced one.</summary>
+    private static List<Pass> BuildPasses(int interlace, int width, int height, int bitsPerPixel)
+    {
+        if (interlace is not (0 or 1))
+            throw new InvalidDataException($"The PNG uses interlace method {interlace}, which is not a defined method.");
+
+        if (interlace == 0)
+            return [new Pass(0, 0, 1, 1, width, height, (width * bitsPerPixel + 7) / 8)];
+
+        List<Pass> passes = [];
+
+        foreach (var (startX, startY, stepX, stepY) in Adam7)
+        {
+            // A pass holds the pixels at its offset, striding outwards. On small images some passes are empty.
+            var passWidth = (width - startX + stepX - 1) / stepX;
+            var passHeight = (height - startY + stepY - 1) / stepY;
+
+            if (passWidth > 0 && passHeight > 0)
+                passes.Add(new Pass(startX, startY, stepX, stepY, passWidth, passHeight, (passWidth * bitsPerPixel + 7) / 8));
+        }
+
+        return passes;
+    }
+
+    private sealed record Pass(int StartX, int StartY, int StepX, int StepY, int Width, int Height, int Stride);
+
+    /// <summary>Reads one sample of a row, most significant bits first. 16-bit samples give their high byte.</summary>
     private static int ReadSample(byte[] row, int sampleIndex, int bitDepth)
     {
         switch (bitDepth)

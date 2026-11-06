@@ -19,11 +19,27 @@ namespace Pic2Stl.Diagnostics;
 /// </summary>
 internal static class SelfTest
 {
+    /// <summary>A 9x5 RGBA PNG stored with Adam7 interlacing, made by an independent encoder.</summary>
+    private const string InterlacedPng =
+        "iVBORw0KGgoAAAANSUhEUgAAAAkAAAAFCAYAAAHgVPb9AAAAhUlEQVR42mPgEpHTcLJpK2BU0wjyYRJzUMsxComa4JfRt4" +
+        "VZQs7CSkM5wJFZwlolUURBzoRFQEvJi49LSggZMwhKahvKK7s66+rGh1qbV6YziOvrB6taeqYaOyeXO/rWdjLIuhqXavv7t" +
+        "ltGps90T25czcgrr2DJzsrLiQ8zCpuqRBNSBABYVR1QfiFHmgAAAABJRU5ErkJggg==";
+
     public static bool IsRequested => Environment.GetEnvironmentVariable("P2S_SELFTEST") == "1";
 
     public static async Task RunAsync(AiModelInstaller installer, PhotoDecoder photoDecoder)
     {
         static void Log(string message) => Console.WriteLine($"[selftest] {message}");
+
+        static void CheckPixel(ImageData image, int x, int y, int red, int green, int blue, int alpha)
+        {
+            var colour = image.GetColor(x, y);
+            var actualAlpha = image.GetChannel(x, y, 3);
+
+            if (colour != new Rgb((byte)red, (byte)green, (byte)blue) || actualAlpha != alpha)
+                throw new InvalidOperationException(
+                    $"Interlaced pixel ({x},{y}) decoded as {colour} alpha {actualAlpha}, wanted ({red},{green},{blue}) alpha {alpha}.");
+        }
 
         try
         {
@@ -41,6 +57,19 @@ internal static class SelfTest
             if (decoded.PreviewPng[24] != 8)
                 throw new InvalidOperationException($"Photo was encoded at {decoded.PreviewPng[24]} bits per channel.");
 #endif
+
+            // Interlaced PNGs arrive as seven sub-images; check the pixels land where they belong.
+            var interlaced = PngDecoder.Decode(Convert.FromBase64String(InterlacedPng));
+            Log($"interlaced {interlaced.Width}x{interlaced.Height}");
+
+            if (interlaced.Width != 9 || interlaced.Height != 5)
+                throw new InvalidOperationException($"Interlaced PNG decoded as {interlaced.Width}x{interlaced.Height}.");
+
+            CheckPixel(interlaced, 0, 0, 10, 20, 30, 40);
+            CheckPixel(interlaced, 1, 0, 17, 25, 43, 49);
+            CheckPixel(interlaced, 4, 0, 38, 40, 82, 76);
+            CheckPixel(interlaced, 3, 2, 37, 57, 73, 101);
+            CheckPixel(interlaced, 8, 4, 78, 104, 142, 180);
 
             var image = SyntheticPhoto();
             Log($"photo {image.Width}x{image.Height}");
