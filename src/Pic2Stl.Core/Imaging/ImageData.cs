@@ -50,6 +50,23 @@ public sealed class ImageData
     public Rgb GetColor(int x, int y) =>
         new(GetChannel(x, y, 0), GetChannel(x, y, 1), GetChannel(x, y, 2));
 
+    /// <summary>Copies a rectangular region out into a new image.</summary>
+    public ImageData Crop(SelectionRect rect)
+    {
+        var clamped = rect.Clamped(Width, Height);
+        if (clamped.IsEmpty)
+            throw new ArgumentException("Selection is empty.", nameof(rect));
+
+        var target = new byte[clamped.Width * clamped.Height * 4];
+        for (var y = 0; y < clamped.Height; y++)
+        {
+            var sourceStart = ((clamped.Y + y) * Width + clamped.X) * 4;
+            Buffer.BlockCopy(_pixels, sourceStart, target, y * clamped.Width * 4, clamped.Width * 4);
+        }
+
+        return new ImageData(clamped.Width, clamped.Height, target);
+    }
+
     /// <summary>Bilinear resample to a new size.</summary>
     public ImageData ResampleTo(int width, int height)
     {

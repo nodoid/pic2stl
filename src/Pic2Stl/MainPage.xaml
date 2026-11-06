@@ -7,168 +7,259 @@
              Title="Pic2Stl"
              BackgroundColor="#0B0F1A">
 
-    <Grid RowDefinitions="Auto,Auto,Auto,*,Auto"
-          RowSpacing="10"
-          Padding="16,10,16,14">
+    <Grid>
+        <Grid RowDefinitions="Auto,Auto,Auto,Auto,*,Auto"
+              RowSpacing="10"
+              Padding="16,10,16,14">
 
-        <!-- Title -->
-        <VerticalStackLayout Grid.Row="0" Spacing="2">
-            <Label Text="Pic2Stl"
-                   FontSize="28"
-                   FontAttributes="Bold"
-                   TextColor="#EEF2FF" />
-            <Label Text="Photo in, printable 3D model out"
-                   FontSize="13"
-                   TextColor="#8C97B5" />
-        </VerticalStackLayout>
-
-        <!-- Photo selection -->
-        <Border Grid.Row="1"
-                BackgroundColor="#161C2C"
-                Stroke="#242C42"
-                StrokeThickness="1"
-                StrokeShape="RoundRectangle 16"
-                Padding="12">
-            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
-                <Border WidthRequest="84"
-                        HeightRequest="84"
-                        BackgroundColor="#0E1220"
-                        Stroke="#242C42"
-                        StrokeThickness="1"
-                        StrokeShape="RoundRectangle 12">
-                    <Image x:Name="PhotoPreview"
-                           Aspect="AspectFill" />
-                </Border>
-
-                <VerticalStackLayout Grid.Column="1" Spacing="8" VerticalOptions="Center">
-                    <Button x:Name="CaptureButton"
-                            Text="Take a picture"
-                            Clicked="OnCaptureClicked"
-                            BackgroundColor="#6C8CFF"
-                            TextColor="#0B0F1A"
-                            FontAttributes="Bold"
-                            CornerRadius="12"
-                            HeightRequest="44" />
-                    <Button x:Name="PickButton"
-                            Text="Use a photo from the device"
-                            Clicked="OnPickClicked"
-                            BackgroundColor="#2A3350"
-                            TextColor="#DCE4FF"
-                            CornerRadius="12"
-                            HeightRequest="44" />
-                </VerticalStackLayout>
-            </Grid>
-        </Border>
-
-        <!-- Settings, generate and progress -->
-        <VerticalStackLayout Grid.Row="2" Spacing="8">
-            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
-                <Label Text="Width"
-                       TextColor="#8C97B5"
+            <!-- Title -->
+            <VerticalStackLayout Grid.Row="0" Spacing="2">
+                <Label Text="Pic2Stl"
+                       FontSize="28"
+                       FontAttributes="Bold"
+                       TextColor="#EEF2FF" />
+                <Label Text="Photo in, printable 3D model out"
                        FontSize="13"
-                       VerticalOptions="Center" />
-                <Slider x:Name="WidthSlider"
+                       TextColor="#8C97B5" />
+            </VerticalStackLayout>
+
+            <!-- Photo selection -->
+            <Border Grid.Row="1"
+                    BackgroundColor="#161C2C"
+                    Stroke="#242C42"
+                    StrokeThickness="1"
+                    StrokeShape="RoundRectangle 16"
+                    Padding="12">
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                    <Border WidthRequest="84"
+                            HeightRequest="84"
+                            BackgroundColor="#0E1220"
+                            Stroke="#242C42"
+                            StrokeThickness="1"
+                            StrokeShape="RoundRectangle 12">
+                        <Image x:Name="PhotoPreview"
+                               Aspect="AspectFill" />
+                    </Border>
+
+                    <VerticalStackLayout Grid.Column="1" Spacing="8" VerticalOptions="Center">
+                        <Button x:Name="CaptureButton"
+                                Text="Take a picture"
+                                Clicked="OnCaptureClicked"
+                                BackgroundColor="#6C8CFF"
+                                TextColor="#0B0F1A"
+                                FontAttributes="Bold"
+                                CornerRadius="12"
+                                HeightRequest="44" />
+                        <Button x:Name="PickButton"
+                                Text="Use a photo from the device"
+                                Clicked="OnPickClicked"
+                                BackgroundColor="#2A3350"
+                                TextColor="#DCE4FF"
+                                CornerRadius="12"
+                                HeightRequest="44" />
+                    </VerticalStackLayout>
+                </Grid>
+            </Border>
+
+            <!-- Crop and object selection, only once there is a photo -->
+            <Grid Grid.Row="2"
+                  x:Name="EditBar"
+                  ColumnDefinitions="*,*,Auto"
+                  ColumnSpacing="8"
+                  IsVisible="False">
+                <Button x:Name="CropButton"
+                        Text="Crop"
+                        Clicked="OnCropClicked"
+                        BackgroundColor="#2A3350"
+                        TextColor="#DCE4FF"
+                        CornerRadius="10"
+                        HeightRequest="38"
+                        FontSize="13" />
+                <Button x:Name="SelectObjectButton"
                         Grid.Column="1"
-                        Minimum="30"
-                        Maximum="150"
-                        Value="80"
-                        MaximumTrackColor="#2A3350"
-                        MinimumTrackColor="#6C8CFF"
-                        ThumbColor="#EEF2FF"
-                        ValueChanged="OnWidthChanged" />
-                <Label x:Name="WidthLabel"
-                       Grid.Column="2"
-                       Text="80 mm"
-                       TextColor="#DCE4FF"
-                       FontSize="13"
-                       WidthRequest="56"
-                       HorizontalTextAlignment="End"
-                       VerticalOptions="Center" />
+                        Text="Select object"
+                        Clicked="OnSelectObjectClicked"
+                        BackgroundColor="#2A3350"
+                        TextColor="#DCE4FF"
+                        CornerRadius="10"
+                        HeightRequest="38"
+                        FontSize="13" />
+                <Button x:Name="ResetPhotoButton"
+                        Grid.Column="2"
+                        Text="Undo edits"
+                        Clicked="OnResetPhotoClicked"
+                        BackgroundColor="#1B2234"
+                        TextColor="#8C97B5"
+                        CornerRadius="10"
+                        HeightRequest="38"
+                        FontSize="13"
+                        IsVisible="False" />
             </Grid>
 
-            <Grid ColumnDefinitions="*,Auto">
-                <VerticalStackLayout Spacing="0">
-                    <Label Text="16 print colours"
-                           TextColor="#DCE4FF"
-                           FontSize="14" />
-                    <Label Text="Off uses 4 colours"
+            <!-- Settings, generate and progress -->
+            <VerticalStackLayout Grid.Row="3" Spacing="8">
+                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                    <Label Text="Width"
                            TextColor="#8C97B5"
-                           FontSize="11" />
-                </VerticalStackLayout>
-                <Switch x:Name="ColourSwitch"
+                           FontSize="13"
+                           VerticalOptions="Center" />
+                    <Slider x:Name="WidthSlider"
+                            Grid.Column="1"
+                            Minimum="30"
+                            Maximum="150"
+                            Value="80"
+                            MaximumTrackColor="#2A3350"
+                            MinimumTrackColor="#6C8CFF"
+                            ThumbColor="#EEF2FF"
+                            ValueChanged="OnWidthChanged" />
+                    <Label x:Name="WidthLabel"
+                           Grid.Column="2"
+                           Text="80 mm"
+                           TextColor="#DCE4FF"
+                           FontSize="13"
+                           WidthRequest="56"
+                           HorizontalTextAlignment="End"
+                           VerticalOptions="Center" />
+                </Grid>
+
+                <Grid ColumnDefinitions="*,Auto">
+                    <VerticalStackLayout Spacing="0">
+                        <Label Text="16 print colours"
+                               TextColor="#DCE4FF"
+                               FontSize="14" />
+                        <Label Text="Off uses 4 colours"
+                               TextColor="#8C97B5"
+                               FontSize="11" />
+                    </VerticalStackLayout>
+                    <Switch x:Name="ColourSwitch"
+                            Grid.Column="1"
+                            OnColor="#6C8CFF"
+                            ThumbColor="#EEF2FF"
+                            VerticalOptions="Center" />
+                </Grid>
+
+                <Button x:Name="GenerateButton"
+                        Text="Generate 3D model"
+                        Clicked="OnGenerateClicked"
+                        IsEnabled="False"
+                        BackgroundColor="#EEF2FF"
+                        TextColor="#0B0F1A"
+                        FontAttributes="Bold"
+                        CornerRadius="12"
+                        HeightRequest="46" />
+
+                <pv:ClaudeProgressBar x:Name="ProgressBar"
+                                      Progress="0"
+                                      Text="Ready when you are"
+                                      IsPercentageShown="True"
+                                      IsAnimating="False"
+                                      BarThickness="10"
+                                      ProgressColor="#6C8CFF"
+                                      TrackColor="#1B2234"
+                                      ShimmerColor="#B9C8FF" />
+            </VerticalStackLayout>
+
+            <!-- 3D view -->
+            <Border Grid.Row="4"
+                    BackgroundColor="#0E1220"
+                    Stroke="#242C42"
+                    StrokeThickness="1"
+                    StrokeShape="RoundRectangle 16"
+                    Padding="0">
+                <Grid>
+                    <controls:MeshViewer x:Name="Viewer" />
+
+                    <Label x:Name="ViewerHint"
+                           Text="The generated model appears here.&#10;Drag to rotate, pinch to zoom."
+                           TextColor="#5A6480"
+                           FontSize="13"
+                           HorizontalTextAlignment="Center"
+                           VerticalOptions="Center"
+                           HorizontalOptions="Center" />
+
+                    <Label x:Name="StatsLabel"
+                           TextColor="#8C97B5"
+                           FontSize="11"
+                           Margin="12,0,12,10"
+                           VerticalOptions="End"
+                           IsVisible="False" />
+                </Grid>
+            </Border>
+
+            <!-- Export -->
+            <Grid Grid.Row="5" ColumnDefinitions="*,*" ColumnSpacing="10">
+                <Button x:Name="Share3mfButton"
+                        Text="Share .3mf"
+                        Clicked="OnShareThreeMf"
+                        IsEnabled="False"
+                        BackgroundColor="#2A3350"
+                        TextColor="#DCE4FF"
+                        CornerRadius="12"
+                        HeightRequest="44" />
+                <Button x:Name="ShareStlButton"
                         Grid.Column="1"
-                        OnColor="#6C8CFF"
-                        ThumbColor="#EEF2FF"
-                        VerticalOptions="Center" />
+                        Text="Share .stl"
+                        Clicked="OnShareStl"
+                        IsEnabled="False"
+                        BackgroundColor="#2A3350"
+                        TextColor="#DCE4FF"
+                        CornerRadius="12"
+                        HeightRequest="44" />
             </Grid>
+        </Grid>
 
-            <Button x:Name="GenerateButton"
-                    Text="Generate 3D model"
-                    Clicked="OnGenerateClicked"
-                    IsEnabled="False"
-                    BackgroundColor="#EEF2FF"
-                    TextColor="#0B0F1A"
-                    FontAttributes="Bold"
-                    CornerRadius="12"
-                    HeightRequest="46" />
+        <!-- Full-screen editor: crop, or pick an object to keep -->
+        <Grid x:Name="EditorPanel"
+              IsVisible="False"
+              BackgroundColor="#0B0F1A"
+              RowDefinitions="Auto,*,Auto"
+              RowSpacing="10"
+              Padding="16,14,16,16">
 
-            <pv:ClaudeProgressBar x:Name="ProgressBar"
-                                  Progress="0"
-                                  Text="Ready when you are"
-                                  IsPercentageShown="True"
-                                  IsAnimating="False"
-                                  BarThickness="10"
-                                  ProgressColor="#6C8CFF"
-                                  TrackColor="#1B2234"
-                                  ShimmerColor="#B9C8FF" />
-        </VerticalStackLayout>
-
-        <!-- 3D view -->
-        <Border Grid.Row="3"
-                BackgroundColor="#0E1220"
-                Stroke="#242C42"
-                StrokeThickness="1"
-                StrokeShape="RoundRectangle 16"
-                Padding="0">
-            <Grid>
-                <controls:MeshViewer x:Name="Viewer" />
-
-                <Label x:Name="ViewerHint"
-                       Text="The generated model appears here.&#10;Drag to rotate, pinch to zoom."
-                       TextColor="#5A6480"
-                       FontSize="13"
-                       HorizontalTextAlignment="Center"
-                       VerticalOptions="Center"
-                       HorizontalOptions="Center" />
-
-                <Label x:Name="StatsLabel"
+            <VerticalStackLayout Grid.Row="0" Spacing="2">
+                <Label x:Name="EditorTitle"
+                       Text="Crop the photo"
+                       FontSize="22"
+                       FontAttributes="Bold"
+                       TextColor="#EEF2FF" />
+                <Label x:Name="EditorHint"
                        TextColor="#8C97B5"
-                       FontSize="11"
-                       Margin="12,0,12,10"
-                       VerticalOptions="End"
-                       IsVisible="False" />
-            </Grid>
-        </Border>
+                       FontSize="12" />
+            </VerticalStackLayout>
 
-        <!-- Export -->
-        <Grid Grid.Row="4" ColumnDefinitions="*,*" ColumnSpacing="10">
-            <Button x:Name="Share3mfButton"
-                    Text="Share .3mf"
-                    Clicked="OnShareThreeMf"
-                    IsEnabled="False"
-                    BackgroundColor="#2A3350"
-                    TextColor="#DCE4FF"
-                    CornerRadius="12"
-                    HeightRequest="44" />
-            <Button x:Name="ShareStlButton"
-                    Grid.Column="1"
-                    Text="Share .stl"
-                    Clicked="OnShareStl"
-                    IsEnabled="False"
-                    BackgroundColor="#2A3350"
-                    TextColor="#DCE4FF"
-                    CornerRadius="12"
-                    HeightRequest="44" />
+            <Grid Grid.Row="1">
+                <Image x:Name="EditorImage"
+                       Aspect="AspectFit" />
+                <controls:SelectionOverlay x:Name="Overlay" />
+            </Grid>
+
+            <Grid Grid.Row="2" ColumnDefinitions="*,*,*" ColumnSpacing="10">
+                <Button Text="Redraw"
+                        Clicked="OnEditorRedraw"
+                        BackgroundColor="#2A3350"
+                        TextColor="#DCE4FF"
+                        CornerRadius="12"
+                        HeightRequest="44"
+                        FontSize="13" />
+                <Button Grid.Column="1"
+                        Text="Cancel"
+                        Clicked="OnEditorCancel"
+                        BackgroundColor="#1B2234"
+                        TextColor="#8C97B5"
+                        CornerRadius="12"
+                        HeightRequest="44"
+                        FontSize="13" />
+                <Button x:Name="EditorApplyButton"
+                        Grid.Column="2"
+                        Text="Apply"
+                        Clicked="OnEditorApply"
+                        IsEnabled="False"
+                        BackgroundColor="#6C8CFF"
+                        TextColor="#0B0F1A"
+                        FontAttributes="Bold"
+                        CornerRadius="12"
+                        HeightRequest="44" />
+            </Grid>
         </Grid>
     </Grid>
 </ContentPage>

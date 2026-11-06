@@ -71,6 +71,22 @@ internal static class SelfTest
             CheckPixel(interlaced, 3, 2, 37, 57, 73, 101);
             CheckPixel(interlaced, 8, 4, 78, 104, 142, 180);
 
+            // Crop, object selection and the preview encoder, exactly as the editor uses them.
+            var subject = SubjectPhoto();
+            var cropped = subject.Crop(new SelectionRect(10, 10, 120, 90));
+            var encoded = PngEncoder.Encode(cropped);
+            var roundTripped = PngDecoder.Decode(encoded);
+            var selection = ObjectSelector.Select(subject, new SelectionRect(5, 5, 190, 140));
+            Log($"crop {cropped.Width}x{cropped.Height} png={encoded.Length} " +
+                $"object={selection.Bounds} kept={selection.Mask.KeptCount}");
+
+            if (roundTripped.Width != cropped.Width || roundTripped.Height != cropped.Height)
+                throw new InvalidOperationException(
+                    $"Cropped preview came back {roundTripped.Width}x{roundTripped.Height}.");
+
+            if (selection.Mask.IsEverything)
+                throw new InvalidOperationException("Object selection kept the whole box instead of the subject.");
+
             var image = SyntheticPhoto();
             Log($"photo {image.Width}x{image.Height}");
 
@@ -95,6 +111,20 @@ internal static class SelfTest
                 ThreeMfWriter.Write(stream, offline.Mesh, offline.Palette.Colours, "selftest");
 
             Log($"stl={new FileInfo(stlPath).Length} 3mf={new FileInfo(threeMfPath).Length}");
+
+            var objectPhoto = subject.Crop(selection.Bounds);
+            var maskedOptions = new GenerationOptions
+            {
+                ColourCount = 4,
+                ExportDetail = 64,
+                PreviewDetail = 20,
+                Keep = selection.Mask,
+            };
+            var masked = await heuristic.GenerateAsync(objectPhoto, maskedOptions);
+            Log($"masked tris={masked.TriangleCount} volume={masked.Mesh.SignedVolume():0.0}");
+
+            if (masked.Mesh.SignedVolume() <= 0)
+                throw new InvalidOperationException("Masked mesh has non-positive volume.");
 
             Log("ensuring ai model");
             var modelPath = await installer.EnsureModelAsync(
@@ -123,6 +153,30 @@ internal static class SelfTest
             Log($"FAILED {ex.GetType().Name}: {ex.Message}");
             Log(ex.StackTrace ?? string.Empty);
         }
+    }
+
+    /// <summary>A red subject on a blue field, so the object selector has a clear edge to follow.</summary>
+    private static ImageData SubjectPhoto()
+    {
+        const int width = 200, height = 150;
+        var pixels = new byte[width * height * 4];
+        var centreX = width / 2.0;
+        var centreY = height / 2.0;
+        var radius = 45.0;
+
+        for (var y = 0; y < height; y++)
+            for (var x = 0; x < width; x++)
+            {
+                var i = (y * width + x) * 4;
+                var subject = (x - centreX) * (x - centreX) + (y - centreY) * (y - centreY) <= radius * radius;
+
+                pixels[i] = subject ? (byte)220 : (byte)35;
+                pixels[i + 1] = subject ? (byte)60 : (byte)70;
+                pixels[i + 2] = subject ? (byte)40 : (byte)130;
+                pixels[i + 3] = 255;
+            }
+
+        return new ImageData(width, height, pixels);
     }
 
     /// <summary>A colourful synthetic photo with a central subject, so depth has something to find.</summary>

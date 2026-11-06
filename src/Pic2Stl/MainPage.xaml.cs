@@ -1,5 +1,7 @@
+using Pic2Stl.Controls;
 using Pic2Stl.Core.Depth;
 using Pic2Stl.Core.Export;
+using Pic2Stl.Core.Imaging;
 using Pic2Stl.Core.Pipeline;
 using Pic2Stl.Services;
 
@@ -11,6 +13,9 @@ public partial class MainPage : ContentPage
     private readonly AiModelInstaller _modelInstaller;
 
     private LoadedPhoto? _photo;
+    private LoadedPhoto? _originalPhoto;
+    private SelectionMask? _keep;
+    private PhotoEditMode _editMode;
     private GenerationResult? _result;
     private string? _threeMfPath;
     private string? _stlPath;
@@ -22,6 +27,8 @@ public partial class MainPage : ContentPage
 
         _photoDecoder = photoDecoder;
         _modelInstaller = modelInstaller;
+
+        Overlay.SelectionChanged += (_, _) => EditorApplyButton.IsEnabled = Overlay.HasSelection;
 
 #if DEBUG
         if (Diagnostics.SelfTest.IsRequested)
@@ -79,9 +86,11 @@ public partial class MainPage : ContentPage
         {
             await using var stream = await file.OpenReadAsync();
             _photo = await _photoDecoder.LoadAsync(stream);
+            _originalPhoto = _photo;
+            _keep = null;
 
-            PhotoPreview.Source = ImageSource.FromStream(() => new MemoryStream(_photo.PreviewPng));
-            SetProgress(0, "Photo ready");
+            ShowPhoto();
+            ResetResult();
         }
         catch (OperationCanceledException)
         {
@@ -109,6 +118,116 @@ public partial class MainPage : ContentPage
         }
     }
 
+    private void ShowPhoto()
+    {
+        if (_photo is null)
+            return;
+
+        PhotoPreview.Source = ImageSource.FromStream(() => new MemoryStream(_photo.PreviewPng));
+        EditBar.IsVisible = true;
+        ResetPhotoButton.IsVisible = !ReferenceEquals(_photo, _originalPhoto);
+        GenerateButton.IsEnabled = true;
+        SetProgress(0, _keep is null ? "Photo ready" : "Object selected");
+    }
+
+    /// <summary>Drops the model whenever the photo it came from changes, so a stale export cannot be shared.</summary>
+    private void ResetResult()
+    {
+        _result = null;
+        _threeMfPath = null;
+        _stlPath = null;
+
+        Viewer.Clear();
+        ViewerHint.IsVisible = true;
+        StatsLabel.IsVisible = false;
+        Share3mfButton.IsEnabled = false;
+        ShareStlButton.IsEnabled = false;
+    }
+
+    private void OnCropClicked(object? sender, EventArgs e) => OpenEditor(PhotoEditMode.Crop);
+
+    private void OnSelectObjectClicked(object? sender, EventArgs e) => OpenEditor(PhotoEditMode.Object);
+
+    private void OpenEditor(PhotoEditMode mode)
+    {
+        if (_photo is null || _busy)
+            return;
+
+        _editMode = mode;
+        var cropping = mode == PhotoEditMode.Crop;
+
+        EditorTitle.Text = cropping ? "Crop the photo" : "Select an object";
+        EditorHint.Text = cropping
+            ? "Drag a box around the part you want. The 3D model is built from that area only."
+            : "Drag a box around the object. It is cut from the background and stood on a flat base.";
+        EditorApplyButton.Text = cropping ? "Crop" : "Use object";
+        EditorApplyButton.IsEnabled = false;
+
+        EditorImage.Source = ImageSource.FromStream(() => new MemoryStream(_photo.PreviewPng));
+        Overlay.Mode = mode;
+        Overlay.Start(_photo.Image.Width, _photo.Image.Height);
+        EditorPanel.IsVisible = true;
+    }
+
+    private void OnEditorRedraw(object? sender, EventArgs e)
+    {
+        if (_photo is null)
+            return;
+
+        Overlay.Start(_photo.Image.Width, _photo.Image.Height);
+        EditorApplyButton.IsEnabled = false;
+    }
+
+    private void OnEditorCancel(object? sender, EventArgs e) => EditorPanel.IsVisible = false;
+
+    private void OnEditorApply(object? sender, EventArgs e)
+    {
+        if (_photo is null || Overlay.Selection is not { } box)
+            return;
+
+        var image = _photo.Image;
+        var rect = SelectionRect.FromFractions(box.X, box.Y, box.Right, box.Bottom, image.Width, image.Height);
+
+        if (rect.Width < 2 || rect.Height < 2)
+        {
+            EditorHint.Text = "That box is too small — drag a bigger one.";
+            return;
+        }
+
+        ImageData edited;
+        if (_editMode == PhotoEditMode.Crop)
+        {
+            edited = image.Crop(rect);
+            _keep = null;
+        }
+        else
+        {
+            var selection = ObjectSelector.Select(image, rect);
+            edited = image.Crop(selection.Bounds);
+
+            // A mask that keeps every pixel is the same as having no mask at all.
+            _keep = selection.Mask.IsEverything ? null : selection.Mask;
+        }
+
+        _photo = new LoadedPhoto(edited, PngEncoder.Encode(edited));
+        EditorPanel.IsVisible = false;
+
+        ShowPhoto();
+        ResetResult();
+    }
+
+    private void OnResetPhotoClicked(object? sender, EventArgs e)
+    {
+        if (_originalPhoto is null || _busy)
+            return;
+
+        _photo = _originalPhoto;
+        _keep = null;
+
+        ShowPhoto();
+        ResetResult();
+    }
+
     private void OnWidthChanged(object? sender, ValueChangedEventArgs e)
     {
         WidthLabel.Text = $"{e.NewValue:0} mm";
@@ -123,6 +242,9 @@ public partial class MainPage : ContentPage
         GenerateButton.IsEnabled = false;
         CaptureButton.IsEnabled = false;
         PickButton.IsEnabled = false;
+        CropButton.IsEnabled = false;
+        SelectObjectButton.IsEnabled = false;
+        ResetPhotoButton.IsEnabled = false;
         Share3mfButton.IsEnabled = false;
         ShareStlButton.IsEnabled = false;
 
@@ -141,6 +263,7 @@ public partial class MainPage : ContentPage
                 WidthMm = (float)WidthSlider.Value,
                 ExportDetail = 220,
                 PreviewDetail = 40,
+                Keep = _keep,
             };
 
             _result = await pipeline.GenerateAsync(_photo.Image, options, new PipelineProgress(this));
@@ -159,6 +282,9 @@ public partial class MainPage : ContentPage
             GenerateButton.IsEnabled = _photo is not null;
             CaptureButton.IsEnabled = true;
             PickButton.IsEnabled = true;
+            CropButton.IsEnabled = true;
+            SelectObjectButton.IsEnabled = true;
+            ResetPhotoButton.IsEnabled = true;
             Share3mfButton.IsEnabled = _threeMfPath is not null;
             ShareStlButton.IsEnabled = _stlPath is not null;
         }

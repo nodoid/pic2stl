@@ -24,6 +24,12 @@ public sealed class GenerationOptions
     /// <summary>Longest side of the on-screen preview grid, in samples.</summary>
     public int PreviewDetail { get; init; } = 72;
 
+    /// <summary>
+    /// Optional object outline, sized to match the source photo. Everything outside it is flattened to the base,
+    /// so a photo with a selected object prints as that object on a plain plinth rather than the whole scene.
+    /// </summary>
+    public SelectionMask? Keep { get; init; }
+
     public int EffectiveColourCount => Math.Clamp(ColourCount, 1, 16);
 
     public float EffectiveReliefMm => ReliefMm > 0 ? ReliefMm : MathF.Max(2f, WidthMm * 0.22f);
@@ -89,6 +95,11 @@ public sealed class MeshGenerationPipeline
         ArgumentNullException.ThrowIfNull(options);
         options.Validate();
 
+        if (options.Keep is { } keep && (keep.Width != source.Width || keep.Height != source.Height))
+            throw new ArgumentException(
+                $"Object mask is {keep.Width}x{keep.Height} but the photo is {source.Width}x{source.Height}.",
+                nameof(options));
+
         var started = _timeProvider.GetTimestamp();
 
         void Report(int percent, string stage) => progress?.Report(new GenerationProgress(Math.Clamp(percent, 0, 100), stage));
@@ -113,6 +124,13 @@ public sealed class MeshGenerationPipeline
         var exportDepth = smoothed.ResampleTo(exportWidth, exportHeight);
         var exportImage = source.ResampleTo(exportWidth, exportHeight);
 
+        var exportMask = options.Keep?.ResampleTo(exportWidth, exportHeight);
+        if (exportMask is not null)
+        {
+            exportDepth = FlattenOutside(exportDepth, exportMask);
+            exportImage = MatteOutside(exportImage, exportMask);
+        }
+
         Report(66, "Choosing print colours");
         var quantised = PaletteBuilder.Build(exportImage, options.EffectiveColourCount);
 
@@ -136,6 +154,14 @@ public sealed class MeshGenerationPipeline
         var (previewWidth, previewHeight) = GridSize(source.Width, source.Height, options.PreviewDetail);
         var previewDepth = smoothed.ResampleTo(previewWidth, previewHeight);
         var previewImage = source.ResampleTo(previewWidth, previewHeight);
+
+        var previewMask = options.Keep?.ResampleTo(previewWidth, previewHeight);
+        if (previewMask is not null)
+        {
+            previewDepth = FlattenOutside(previewDepth, previewMask);
+            previewImage = MatteOutside(previewImage, previewMask);
+        }
+
         var previewMap = PaletteBuilder.Map(previewImage, quantised.Palette);
         var previewMesh = SolidMesher.Build(previewDepth, previewMap, meshOptions);
 
@@ -143,6 +169,58 @@ public sealed class MeshGenerationPipeline
         Report(100, "Done");
 
         return new GenerationResult(mesh, previewMesh, quantised.Palette, smoothed, _depthEstimator.EngineName, elapsed);
+    }
+
+    /// <summary>Sets depth outside the object to zero, which makes the base slab flat there.</summary>
+    private static DepthMap FlattenOutside(DepthMap depth, SelectionMask keep)
+    {
+        var values = new float[depth.Width * depth.Height];
+        for (var y = 0; y < depth.Height; y++)
+            for (var x = 0; x < depth.Width; x++)
+                values[y * depth.Width + x] = keep.At(x, y) ? depth.At(x, y) : 0f;
+
+        return new DepthMap(depth.Width, depth.Height, values);
+    }
+
+    /// <summary>
+    /// Paints the background around the object in its own average colour, so the plinth blends with the photo
+    /// instead of carrying the original scene's clutter into the print.
+    /// </summary>
+    private static ImageData MatteOutside(ImageData image, SelectionMask keep)
+    {
+        long r = 0, g = 0, b = 0, count = 0;
+        for (var y = 0; y < image.Height; y++)
+            for (var x = 0; x < image.Width; x++)
+            {
+                if (keep.At(x, y))
+                    continue;
+
+                r += image.GetChannel(x, y, 0);
+                g += image.GetChannel(x, y, 1);
+                b += image.GetChannel(x, y, 2);
+                count++;
+            }
+
+        if (count == 0)
+            return image;
+
+        var background = new Rgb((byte)(r / count), (byte)(g / count), (byte)(b / count));
+        var pixels = (byte[])image.Pixels.Clone();
+
+        for (var y = 0; y < image.Height; y++)
+            for (var x = 0; x < image.Width; x++)
+            {
+                if (keep.At(x, y))
+                    continue;
+
+                var i = (y * image.Width + x) * 4;
+                pixels[i] = background.R;
+                pixels[i + 1] = background.G;
+                pixels[i + 2] = background.B;
+                pixels[i + 3] = 255;
+            }
+
+        return new ImageData(image.Width, image.Height, pixels);
     }
 
     /// <summary>Maps the 0..1 depth-stage progress onto the pipeline's 5..55 percent window.</summary>

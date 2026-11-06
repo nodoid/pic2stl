@@ -42,6 +42,13 @@ public sealed class MeshViewer : GraphicsView, IDrawable
         ResetView();
     }
 
+    public void Clear()
+    {
+        _mesh = null;
+        _palette = [];
+        ResetView();
+    }
+
     public void ResetView()
     {
         _yaw = -0.55f;
