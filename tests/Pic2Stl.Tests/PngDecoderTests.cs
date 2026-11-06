@@ -80,11 +80,42 @@ public class PngDecoderTests
     }
 
     [Test]
-    public void Decode_RejectsWrongBitDepth()
+    public void Decode_SixteenBitRgbaUsesTheHighByte()
+    {
+        var source = Sample();
+        var decoded = PngDecoder.Decode(TestPng.Encode(source, bitDepth: 16, lowByte: 0x7F));
+
+        Assert.That(decoded.Pixels, Is.EqualTo(source.Pixels));
+    }
+
+    [Test]
+    public void Decode_SixteenBitUpFilteredImageRoundTrips()
+    {
+        var source = Sample();
+        var decoded = PngDecoder.Decode(TestPng.Encode(source, filter: 2, bitDepth: 16, lowByte: 0xAB));
+
+        Assert.That(decoded.Pixels, Is.EqualTo(source.Pixels));
+    }
+
+    [Test]
+    public void Decode_SixteenBitRgbImageGetsOpaqueAlpha()
+    {
+        var source = Sample();
+        var decoded = PngDecoder.Decode(TestPng.Encode(source, colourType: 2, bitDepth: 16));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(decoded.GetColor(1, 0), Is.EqualTo(new Rgb(0, 255, 0)));
+            Assert.That(decoded.GetChannel(1, 0, 3), Is.EqualTo(255));
+        });
+    }
+
+    [Test]
+    public void Decode_RejectsUnsupportedBitDepth()
     {
         var png = TestPng.Encode(Sample());
         // IHDR starts after the 8-byte signature and 8 bytes of chunk header; bit depth is byte 8 of the data.
-        png[8 + 8 + 8] = 16;
+        png[8 + 8 + 8] = 4;
 
         Assert.That(() => PngDecoder.Decode(png), Throws.TypeOf<InvalidDataException>());
     }

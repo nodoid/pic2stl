@@ -9,7 +9,8 @@ internal static class TestPng
 {
     private static readonly byte[] Signature = [137, 80, 78, 71, 13, 10, 26, 10];
 
-    public static byte[] Encode(ImageData image, int filter = 0, int colourType = 6)
+    /// <param name="lowByte">Value stored in the low byte of every 16-bit sample; it must be ignored.</param>
+    public static byte[] Encode(ImageData image, int filter = 0, int colourType = 6, int bitDepth = 8, byte lowByte = 0)
     {
         var channels = colourType switch
         {
@@ -20,8 +21,13 @@ internal static class TestPng
             _ => throw new ArgumentOutOfRangeException(nameof(colourType)),
         };
 
-        var stride = image.Width * channels;
-        var raw = new byte[image.Height * (stride + 1)];
+        if (bitDepth is not (8 or 16))
+            throw new ArgumentOutOfRangeException(nameof(bitDepth));
+
+        var bytesPerSample = bitDepth / 8;
+        var bytesPerPixel = channels * bytesPerSample;
+        var stride = image.Width * bytesPerPixel;
+        var samples = new byte[image.Height * stride];
 
         byte Source(int x, int y, int channel)
         {
@@ -36,20 +42,32 @@ internal static class TestPng
         }
 
         for (var y = 0; y < image.Height; y++)
+            for (var x = 0; x < image.Width; x++)
+                for (var c = 0; c < channels; c++)
+                {
+                    var offset = y * stride + (x * channels + c) * bytesPerSample;
+                    samples[offset] = Source(x, y, c);
+
+                    if (bytesPerSample == 2)
+                        samples[offset + 1] = lowByte;
+                }
+
+        var raw = new byte[image.Height * (stride + 1)];
+
+        for (var y = 0; y < image.Height; y++)
         {
             var rowStart = y * (stride + 1);
             raw[rowStart] = (byte)filter;
 
-            for (var x = 0; x < image.Width; x++)
-                for (var c = 0; c < channels; c++)
-                {
-                    var value = Source(x, y, c);
-                    var stored = filter == 2 && y > 0
-                        ? (byte)(value - Source(x, y - 1, c))
-                        : value;
+            for (var i = 0; i < stride; i++)
+            {
+                var value = samples[y * stride + i];
+                var stored = filter == 2 && y > 0
+                    ? (byte)(value - samples[(y - 1) * stride + i])
+                    : value;
 
-                    raw[rowStart + 1 + x * channels + c] = stored;
-                }
+                raw[rowStart + 1 + i] = stored;
+            }
         }
 
         using var output = new MemoryStream();
@@ -58,7 +76,7 @@ internal static class TestPng
         var header = new byte[13];
         WriteBigEndian(header, 0, (uint)image.Width);
         WriteBigEndian(header, 4, (uint)image.Height);
-        header[8] = 8;
+        header[8] = (byte)bitDepth;
         header[9] = (byte)colourType;
         WriteChunk(output, "IHDR", header);
 

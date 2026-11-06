@@ -5,7 +5,8 @@ using Pic2Stl.Core.Imaging;
 namespace Pic2Stl.Core.Imaging;
 
 /// <summary>
-/// Minimal PNG reader for the 8-bit, non-interlaced images the platform photo decoders produce.
+/// Minimal PNG reader for the non-interlaced images the platform photo decoders produce. 8-bit and 16-bit
+/// samples are accepted; 16-bit ones are reduced to 8 bits, which is all the AI input needs.
 /// Decoding in shared code keeps the AI input identical on iOS and Android and makes it testable.
 /// </summary>
 public static class PngDecoder
@@ -70,8 +71,8 @@ public static class PngDecoder
         if (!seenHeader)
             throw new InvalidDataException("PNG has no IHDR chunk.");
 
-        if (bitDepth != 8)
-            throw new InvalidDataException($"Only 8-bit PNGs are supported, got {bitDepth} bit.");
+        if (bitDepth is not (8 or 16))
+            throw new InvalidDataException($"Only 8-bit and 16-bit PNGs are supported, got {bitDepth} bit.");
 
         if (interlace != 0)
             throw new InvalidDataException("Interlaced PNGs are not supported.");
@@ -88,7 +89,10 @@ public static class PngDecoder
         if (width < 1 || height < 1)
             throw new InvalidDataException("PNG has invalid dimensions.");
 
-        var stride = width * channels;
+        // 16-bit samples are two big-endian bytes each; filtering works byte by byte either way.
+        var bytesPerSample = bitDepth / 8;
+        var bytesPerPixel = channels * bytesPerSample;
+        var stride = width * bytesPerPixel;
         var raw = new byte[height * (stride + 1)];
 
         compressed.Position = 0;
@@ -116,36 +120,28 @@ public static class PngDecoder
             var rowStart = y * (stride + 1);
             var filter = raw[rowStart];
             Buffer.BlockCopy(raw, rowStart + 1, current, 0, stride);
-            Unfilter(filter, current, previous, channels);
+            Unfilter(filter, current, previous, bytesPerPixel);
 
             for (var x = 0; x < width; x++)
             {
                 var i = (y * width + x) * 4;
-                var s = x * channels;
+                var s = x * bytesPerPixel;
 
-                switch (channels)
+                // For 16-bit samples the high byte is the 8-bit value, so reading it truncates correctly.
+                var red = current[s];
+                var green = channels >= 3 ? current[s + bytesPerSample] : red;
+                var blue = channels >= 3 ? current[s + 2 * bytesPerSample] : red;
+                var alpha = channels switch
                 {
-                    case 1:
-                        pixels[i] = pixels[i + 1] = pixels[i + 2] = current[s];
-                        pixels[i + 3] = 255;
-                        break;
-                    case 2:
-                        pixels[i] = pixels[i + 1] = pixels[i + 2] = current[s];
-                        pixels[i + 3] = current[s + 1];
-                        break;
-                    case 3:
-                        pixels[i] = current[s];
-                        pixels[i + 1] = current[s + 1];
-                        pixels[i + 2] = current[s + 2];
-                        pixels[i + 3] = 255;
-                        break;
-                    default:
-                        pixels[i] = current[s];
-                        pixels[i + 1] = current[s + 1];
-                        pixels[i + 2] = current[s + 2];
-                        pixels[i + 3] = current[s + 3];
-                        break;
-                }
+                    2 => current[s + bytesPerSample],
+                    4 => current[s + 3 * bytesPerSample],
+                    _ => (byte)255,
+                };
+
+                pixels[i] = red;
+                pixels[i + 1] = green;
+                pixels[i + 2] = blue;
+                pixels[i + 3] = alpha;
             }
 
             (previous, current) = (current, previous);
