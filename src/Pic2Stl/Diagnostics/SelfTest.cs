@@ -4,6 +4,11 @@ using Pic2Stl.Core.Depth;
 using Pic2Stl.Core.Export;
 using Pic2Stl.Core.Imaging;
 using Pic2Stl.Core.Pipeline;
+using Pic2Stl.Services;
+#if IOS
+using CoreGraphics;
+using UIKit;
+#endif
 
 namespace Pic2Stl.Diagnostics;
 
@@ -16,13 +21,27 @@ internal static class SelfTest
 {
     public static bool IsRequested => Environment.GetEnvironmentVariable("P2S_SELFTEST") == "1";
 
-    public static async Task RunAsync(AiModelInstaller installer)
+    public static async Task RunAsync(AiModelInstaller installer, PhotoDecoder photoDecoder)
     {
         static void Log(string message) => Console.WriteLine($"[selftest] {message}");
 
         try
         {
             Log("start");
+
+#if IOS
+            // Decoding touches UIKit, so it must work when called from a worker thread, as photo loading does.
+            var jpeg = await MainThread.InvokeOnMainThreadAsync(CreateTestJpeg);
+            var decoded = await Task.Run(() => photoDecoder.LoadAsync(new MemoryStream(jpeg)));
+            // IHDR sits at offset 16; its bit depth and colour type describe the encoded PNG.
+            Log($"photo decode {decoded.Image.Width}x{decoded.Image.Height} png={decoded.PreviewPng.Length} " +
+                $"depth={decoded.PreviewPng[24]} type={decoded.PreviewPng[25]}");
+            if (decoded.Image.Width != 480)
+                throw new InvalidOperationException($"Decoded photo came back {decoded.Image.Width}px wide.");
+            if (decoded.PreviewPng[24] != 8)
+                throw new InvalidOperationException($"Photo was encoded at {decoded.PreviewPng[24]} bits per channel.");
+#endif
+
             var image = SyntheticPhoto();
             Log($"photo {image.Width}x{image.Height}");
 
@@ -112,5 +131,24 @@ internal static class SelfTest
 
         return new ImageData(width, height, pixels);
     }
+
+#if IOS
+    /// <summary>A JPEG, made the way iOS encodes photos, to feed the real photo decoder.</summary>
+    private static byte[] CreateTestJpeg()
+    {
+        using var format = new UIGraphicsImageRendererFormat { Opaque = true, Scale = 1 };
+        using var renderer = new UIGraphicsImageRenderer(new CGSize(480, 360), format);
+        using var image = renderer.CreateImage(context =>
+        {
+            var cg = context.CGContext;
+            cg.SetFillColor(UIColor.FromRGB(40, 90, 160).CGColor);
+            cg.FillRect(new CGRect(0, 0, 480, 360));
+            cg.SetFillColor(UIColor.FromRGB(240, 200, 60).CGColor);
+            cg.FillRect(new CGRect(120, 80, 200, 200));
+        });
+        using var jpeg = image.AsJPEG(0.9f);
+        return jpeg.ToArray();
+    }
+#endif
 }
 #endif

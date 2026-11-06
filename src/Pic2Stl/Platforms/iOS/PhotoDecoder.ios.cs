@@ -6,9 +6,13 @@ namespace Pic2Stl.Services;
 
 public sealed partial class PhotoDecoder
 {
-    private static partial Task<byte[]> DecodeToPngAsync(byte[] source, int maxSide, CancellationToken cancellationToken)
+    private static async partial Task<byte[]> DecodeToPngAsync(byte[] source, int maxSide, CancellationToken cancellationToken)
     {
-        return Task.Run(() =>
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // UIImage and UIGraphicsImageRenderer are UIKit: they must only be used on the UI thread, and this is
+        // called during photo loading, which continues on a worker thread after the stream has been read.
+        return await MainThread.InvokeOnMainThreadAsync(() =>
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -24,10 +28,34 @@ public sealed partial class PhotoDecoder
             // Rendering bakes in EXIF orientation, so the pixels come out upright.
             using var format = new UIGraphicsImageRendererFormat { Opaque = false, Scale = 1 };
             using var renderer = new UIGraphicsImageRenderer(new CGSize(width, height), format);
-            using var resized = renderer.CreateImage(_ => image.Draw(new CGRect(0, 0, width, height)));
-            using var png = resized.AsPNG()
+            using var upright = renderer.CreateImage(_ => image.Draw(new CGRect(0, 0, width, height)));
+
+            // On wide-colour devices that renderer can produce 16 bits per channel, so redraw into an explicit
+            // 8-bit sRGB buffer: the shared decoder (and the AI input) expects 8-bit samples.
+            using var colourSpace = CGColorSpace.CreateSrgb();
+            using var buffer = NSMutableData.FromLength(width * height * 4);
+            using var context = new CGBitmapContext(
+                buffer.MutableBytes,
+                width,
+                height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                colourSpace,
+                CGImageAlphaInfo.PremultipliedLast);
+
+            context.InterpolationQuality = CGInterpolationQuality.High;
+
+            // Bitmap contexts start at the bottom left, so flip the drawing to keep the photo the right way up.
+            context.TranslateCTM(0, height);
+            context.ScaleCTM(1, -1);
+            context.DrawImage(new CGRect(0, 0, width, height), upright.CGImage);
+
+            using var flattened = context.ToImage()
+                                  ?? throw new InvalidDataException("The photo could not be scaled.");
+            using var output = UIImage.FromImage(flattened);
+            using var png = output.AsPNG()
                             ?? throw new InvalidDataException("The photo could not be encoded.");
             return png.ToArray();
-        }, cancellationToken);
+        });
     }
 }

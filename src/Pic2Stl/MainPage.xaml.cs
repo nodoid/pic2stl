@@ -25,7 +25,7 @@ public partial class MainPage : ContentPage
 
 #if DEBUG
         if (Diagnostics.SelfTest.IsRequested)
-            _ = Diagnostics.SelfTest.RunAsync(modelInstaller);
+            _ = Diagnostics.SelfTest.RunAsync(modelInstaller, photoDecoder);
 #endif
     }
 
