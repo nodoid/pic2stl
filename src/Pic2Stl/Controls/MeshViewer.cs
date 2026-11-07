@@ -4,33 +4,41 @@ using Pic2Stl.Core.Geometry;
 namespace Pic2Stl.Controls;
 
 /// <summary>
-/// Draws a mesh on a <see cref="GraphicsView"/> and lets the user rotate it by dragging and zoom it by pinching.
-/// Triangles are flat shaded, back faces are culled and the rest are painted back to front.
+/// Draws a mesh on a <see cref="GraphicsView"/> and lets the user rotate it with one finger and zoom it with a
+/// two-finger pinch. Triangles are flat shaded, back faces are culled and the rest are painted back to front.
 /// </summary>
+/// <remarks>
+/// The touches are handled from the interaction events rather than from gesture recognizers: a view with
+/// recognizers attached stops raising those events, and a one-finger pan recognizer cannot tell two fingers on
+/// a pinch from one finger dragging.
+/// </remarks>
 public sealed class MeshViewer : GraphicsView, IDrawable
 {
     private static readonly Vector3 LightDirection = new Vector3(-0.35f, 0.55f, 0.8f).Normalized();
 
+    private readonly OrbitGesture _orbit = new();
+
     private Mesh? _mesh;
     private IReadOnlyList<Rgb> _palette = [];
-    private float _yaw = -0.55f;
-    private float _pitch = 0.32f;
-    private float _zoom = 1f;
-    private float _startYaw;
-    private float _startPitch;
-    private float _startZoom = 1f;
 
     public MeshViewer()
     {
         Drawable = this;
 
-        var pan = new PanGestureRecognizer();
-        pan.PanUpdated += OnPanUpdated;
-        GestureRecognizers.Add(pan);
+        StartInteraction += (_, e) =>
+        {
+            if (_orbit.Begin(Points(e)))
+                Invalidate();
+        };
 
-        var pinch = new PinchGestureRecognizer();
-        pinch.PinchUpdated += OnPinchUpdated;
-        GestureRecognizers.Add(pinch);
+        DragInteraction += (_, e) =>
+        {
+            if (_orbit.Move(Points(e)))
+                Invalidate();
+        };
+
+        EndInteraction += (_, _) => _orbit.End();
+        CancelInteraction += (_, _) => _orbit.End();
     }
 
     public bool HasModel => _mesh is { Triangles.Count: > 0 };
@@ -51,43 +59,13 @@ public sealed class MeshViewer : GraphicsView, IDrawable
 
     public void ResetView()
     {
-        _yaw = -0.55f;
-        _pitch = 0.32f;
-        _zoom = 1f;
+        _orbit.Reset();
         Invalidate();
     }
 
-    private void OnPanUpdated(object? sender, PanUpdatedEventArgs e)
-    {
-        switch (e.StatusType)
-        {
-            case GestureStatus.Started:
-                _startYaw = _yaw;
-                _startPitch = _pitch;
-                break;
-
-            case GestureStatus.Running:
-                _yaw = _startYaw + (float)e.TotalX * 0.01f;
-                _pitch = Math.Clamp(_startPitch + (float)e.TotalY * 0.01f, -1.45f, 1.45f);
-                Invalidate();
-                break;
-        }
-    }
-
-    private void OnPinchUpdated(object? sender, PinchGestureUpdatedEventArgs e)
-    {
-        switch (e.Status)
-        {
-            case GestureStatus.Started:
-                _startZoom = _zoom;
-                break;
-
-            case GestureStatus.Running:
-                _zoom = Math.Clamp(_startZoom + (float)(e.Scale - 1) * _startZoom, 0.35f, 5f);
-                Invalidate();
-                break;
-        }
-    }
+    /// <summary>Every finger currently on the view; two of them mean a pinch.</summary>
+    private static (float X, float Y)[] Points(TouchEventArgs e) =>
+        e.Touches.Select(touch => (touch.X, touch.Y)).ToArray();
 
     public void Draw(ICanvas canvas, RectF dirtyRect)
     {
@@ -100,10 +78,10 @@ public sealed class MeshViewer : GraphicsView, IDrawable
 
         var source = mesh.Vertices;
         var rotated = new Vector3[source.Count];
-        var sinYaw = MathF.Sin(_yaw);
-        var cosYaw = MathF.Cos(_yaw);
-        var sinPitch = MathF.Sin(_pitch);
-        var cosPitch = MathF.Cos(_pitch);
+        var sinYaw = MathF.Sin(_orbit.Yaw);
+        var cosYaw = MathF.Cos(_orbit.Yaw);
+        var sinPitch = MathF.Sin(_orbit.Pitch);
+        var cosPitch = MathF.Cos(_orbit.Pitch);
 
         for (var i = 0; i < source.Count; i++)
         {
@@ -115,7 +93,7 @@ public sealed class MeshViewer : GraphicsView, IDrawable
             rotated[i] = new Vector3(x1, y2, z2);
         }
 
-        var scale = MathF.Min(dirtyRect.Width, dirtyRect.Height) * 0.44f * _zoom / MathF.Max(Radius(source), 1e-3f);
+        var scale = MathF.Min(dirtyRect.Width, dirtyRect.Height) * 0.44f * _orbit.Zoom / MathF.Max(Radius(source), 1e-3f);
         var centerX = dirtyRect.Center.X;
         var centerY = dirtyRect.Center.Y;
 
