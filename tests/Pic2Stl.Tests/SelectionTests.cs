@@ -232,9 +232,39 @@ public class ObjectSelectorTests
     }
 
     [Test]
-    public void Select_ValidatesItsInput()
+    public void Select_ATighterToleranceKeepsLessOfAFadingSubject()
     {
-        var image = SubjectOnBackground();
+        // A subject whose colour drifts from left to right, so how far the fill reaches depends on tolerance.
+        const int width = 60, height = 40;
+        var pixels = new byte[width * height * 4];
+        for (var y = 0; y < height; y++)
+            for (var x = 0; x < width; x++)
+            {
+                var i = (y * width + x) * 4;
+                var red = (byte)(100 + x * 100 / (width - 1));
+                pixels[i] = red;
+                pixels[i + 1] = 60;
+                pixels[i + 2] = 40;
+                pixels[i + 3] = 255;
+            }
+
+        var image = new ImageData(width, height, pixels);
+        var box = new SelectionRect(0, 0, width, height);
+
+        var tight = ObjectSelector.Select(image, box, 0.02f);
+        var loose = ObjectSelector.Select(image, box, 0.4f);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(tight.Mask.KeptCount, Is.LessThan(loose.Mask.KeptCount));
+            Assert.That(tight.Bounds.Width, Is.LessThan(loose.Bounds.Width));
+            Assert.That(loose.Mask.IsEverything, Is.True, "A wide tolerance should sweep in the whole box.");
+        });
+    }
+
+    [Test]
+    public void Select_ValidatesItsInput()
+    {        var image = SubjectOnBackground();
 
         Assert.Multiple(() =>
         {
@@ -263,6 +293,23 @@ public class SelectionMaskTests
             Assert.That(half.Width, Is.EqualTo(2));
             Assert.That(half.At(0, 0), Is.False);
             Assert.That(half.At(1, 0), Is.True);
+        });
+    }
+
+    [Test]
+    public void Tint_PaintsTheKeptPixelsAndLeavesTheRestTransparent()
+    {
+        var mask = new SelectionMask(2, 2, [true, false, false, true]);
+        var tint = mask.Tint(new Rgb(10, 200, 120), 90);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(tint.Width, Is.EqualTo(2));
+            Assert.That(tint.Height, Is.EqualTo(2));
+            Assert.That(tint.GetColor(0, 0), Is.EqualTo(new Rgb(10, 200, 120)));
+            Assert.That(tint.GetChannel(0, 0, 3), Is.EqualTo(90));
+            Assert.That(tint.GetChannel(1, 0, 3), Is.EqualTo(0), "Background pixels must not be tinted.");
+            Assert.That(tint.GetChannel(1, 1, 3), Is.EqualTo(90));
         });
     }
 

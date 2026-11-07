@@ -1,4 +1,5 @@
 using Pic2Stl.Controls;
+using Pic2Stl.Core.Colours;
 using Pic2Stl.Core.Depth;
 using Pic2Stl.Core.Export;
 using Pic2Stl.Core.Imaging;
@@ -12,10 +13,15 @@ public partial class MainPage : ContentPage
     private readonly PhotoDecoder _photoDecoder;
     private readonly AiModelInstaller _modelInstaller;
 
+    /// <summary>How many edits back the undo button can reach; photos are capped at 1024px so each step is small.</summary>
+    private const int UndoLimit = 6;
+
+    private readonly List<PhotoStep> _undo = [];
+
     private LoadedPhoto? _photo;
-    private LoadedPhoto? _originalPhoto;
     private SelectionMask? _keep;
     private PhotoEditMode _editMode;
+    private bool _sliderDragging;
     private GenerationResult? _result;
     private string? _threeMfPath;
     private string? _stlPath;
@@ -28,11 +34,24 @@ public partial class MainPage : ContentPage
         _photoDecoder = photoDecoder;
         _modelInstaller = modelInstaller;
 
-        Overlay.SelectionChanged += (_, _) => EditorApplyButton.IsEnabled = Overlay.HasSelection;
+        Overlay.SelectionChanged += OnSelectionChanged;
 
 #if DEBUG
         if (Diagnostics.SelfTest.IsRequested)
             _ = Diagnostics.SelfTest.RunAsync(modelInstaller, photoDecoder);
+
+        if (SnapshotRequested)
+        {
+            var started = false;
+            Loaded += async (_, _) =>
+            {
+                if (started)
+                    return;
+
+                started = true;
+                await RunSnapshotAsync();
+            };
+        }
 #endif
     }
 
@@ -86,8 +105,8 @@ public partial class MainPage : ContentPage
         {
             await using var stream = await file.OpenReadAsync();
             _photo = await _photoDecoder.LoadAsync(stream);
-            _originalPhoto = _photo;
             _keep = null;
+            _undo.Clear();
 
             ShowPhoto();
             ResetResult();
@@ -125,7 +144,8 @@ public partial class MainPage : ContentPage
 
         PhotoPreview.Source = ImageSource.FromStream(() => new MemoryStream(_photo.PreviewPng));
         EditBar.IsVisible = true;
-        ResetPhotoButton.IsVisible = !ReferenceEquals(_photo, _originalPhoto);
+        UndoButton.IsVisible = _undo.Count > 0;
+        UndoButton.Text = _undo.Count > 0 ? $"Undo {_undo[^1].Label}" : "Undo";
         GenerateButton.IsEnabled = true;
         SetProgress(0, _keep is null ? "Photo ready" : "Object selected");
     }
@@ -142,6 +162,12 @@ public partial class MainPage : ContentPage
         StatsLabel.IsVisible = false;
         Share3mfButton.IsEnabled = false;
         ShareStlButton.IsEnabled = false;
+    }
+
+    private void OnSelectionChanged(object? sender, EventArgs e)
+    {
+        EditorApplyButton.IsEnabled = Overlay.HasSelection;
+        UpdateOutlinePreview();
     }
 
     private void OnCropClicked(object? sender, EventArgs e) => OpenEditor(PhotoEditMode.Crop);
@@ -162,10 +188,13 @@ public partial class MainPage : ContentPage
             : "Drag a box around the object. It is cut from the background and stood on a flat base.";
         EditorApplyButton.Text = cropping ? "Crop" : "Use object";
         EditorApplyButton.IsEnabled = false;
+        EditorObjectOptions.IsVisible = !cropping;
+        EditorObjectStatus.Text = cropping ? string.Empty : "Drag a box around the object.";
 
         EditorImage.Source = ImageSource.FromStream(() => new MemoryStream(_photo.PreviewPng));
         Overlay.Mode = mode;
         Overlay.Start(_photo.Image.Width, _photo.Image.Height);
+        Overlay.SetOutline(null, default);
         EditorPanel.IsVisible = true;
     }
 
@@ -178,7 +207,74 @@ public partial class MainPage : ContentPage
         EditorApplyButton.IsEnabled = false;
     }
 
-    private void OnEditorCancel(object? sender, EventArgs e) => EditorPanel.IsVisible = false;
+    private void OnEditorCancel(object? sender, EventArgs e)
+    {
+        EditorPanel.IsVisible = false;
+        Overlay.SetOutline(null, default);
+    }
+
+    /// <summary>
+    /// Shows the object the colour match would keep, computed on a downscaled copy so the strictness slider
+    /// stays responsive while it is dragged. Apply repeats the same match at full resolution.
+    /// </summary>
+    private void UpdateOutlinePreview()
+    {
+        if (_photo is null || _editMode != PhotoEditMode.Object || Overlay.Selection is not { } box)
+        {
+            Overlay.SetOutline(null, default);
+            if (!string.IsNullOrEmpty(EditorObjectStatus.Text))
+                EditorObjectStatus.Text = "Drag a box around the object.";
+            return;
+        }
+
+        var image = _photo.Image;
+        var scale = Math.Min(1.0, 320.0 / Math.Max(image.Width, image.Height));
+        var preview = scale < 1
+            ? image.ResampleTo(
+                Math.Max(2, (int)Math.Round(image.Width * scale)),
+                Math.Max(2, (int)Math.Round(image.Height * scale)))
+            : image;
+
+        var rect = SelectionRect.FromFractions(box.X, box.Y, box.Right, box.Bottom, preview.Width, preview.Height);
+        if (rect.Width < 2 || rect.Height < 2)
+        {
+            Overlay.SetOutline(null, default);
+            return;
+        }
+
+        var selection = ObjectSelector.Select(preview, rect, (float)EditorToleranceSlider.Value);
+        var bounds = new RectF(
+            (float)selection.Bounds.X / preview.Width,
+            (float)selection.Bounds.Y / preview.Height,
+            (float)selection.Bounds.Width / preview.Width,
+            (float)selection.Bounds.Height / preview.Height);
+
+        // The tint is a preview only, so it is drawn at the same reduced size it was matched at.
+        Overlay.SetOutline(PngEncoder.Encode(selection.Mask.Tint(new Rgb(0x4A, 0xDE, 0xA9), 80)), bounds);
+
+        // Measured against the box the user drew, so every step of the slider gives a bigger number.
+        var kept = selection.Mask.KeptCount / (float)(rect.Width * rect.Height);
+        EditorObjectStatus.Text = selection.Mask.IsEverything
+            ? "No separate object found — the whole box will be used."
+            : $"Keeps {kept:P0} of the box.";
+    }
+
+    private void OnToleranceDragStarted(object? sender, EventArgs e) => _sliderDragging = true;
+
+    private void OnToleranceDragCompleted(object? sender, EventArgs e)
+    {
+        _sliderDragging = false;
+        UpdateOutlinePreview();
+    }
+
+    private void OnToleranceChanged(object? sender, ValueChangedEventArgs e)
+    {
+        EditorToleranceLabel.Text = $"{e.NewValue:P0}";
+
+        // Dragging the thumb would otherwise re-match on every intermediate value.
+        if (!_sliderDragging)
+            UpdateOutlinePreview();
+    }
 
     private void OnEditorApply(object? sender, EventArgs e)
     {
@@ -195,34 +291,53 @@ public partial class MainPage : ContentPage
         }
 
         ImageData edited;
+        SelectionMask? keep;
         if (_editMode == PhotoEditMode.Crop)
         {
             edited = image.Crop(rect);
-            _keep = null;
+            keep = null;
         }
         else
         {
-            var selection = ObjectSelector.Select(image, rect);
+            var selection = ObjectSelector.Select(image, rect, (float)EditorToleranceSlider.Value);
             edited = image.Crop(selection.Bounds);
 
             // A mask that keeps every pixel is the same as having no mask at all.
-            _keep = selection.Mask.IsEverything ? null : selection.Mask;
+            keep = selection.Mask.IsEverything ? null : selection.Mask;
         }
 
+        PushUndo(_editMode == PhotoEditMode.Crop ? "crop" : "object");
+
         _photo = new LoadedPhoto(edited, PngEncoder.Encode(edited));
+        _keep = keep;
         EditorPanel.IsVisible = false;
+        Overlay.SetOutline(null, default);
 
         ShowPhoto();
         ResetResult();
     }
 
-    private void OnResetPhotoClicked(object? sender, EventArgs e)
+    /// <summary>Remembers the photo as it is now, so the next edit can be taken back one step.</summary>
+    private void PushUndo(string label)
     {
-        if (_originalPhoto is null || _busy)
+        if (_photo is null)
             return;
 
-        _photo = _originalPhoto;
-        _keep = null;
+        _undo.Add(new PhotoStep(_photo, _keep, label));
+        if (_undo.Count > UndoLimit)
+            _undo.RemoveAt(0);
+    }
+
+    private void OnUndoClicked(object? sender, EventArgs e)
+    {
+        if (_undo.Count == 0 || _busy)
+            return;
+
+        var step = _undo[^1];
+        _undo.RemoveAt(_undo.Count - 1);
+
+        _photo = step.Photo;
+        _keep = step.Keep;
 
         ShowPhoto();
         ResetResult();
@@ -244,7 +359,7 @@ public partial class MainPage : ContentPage
         PickButton.IsEnabled = false;
         CropButton.IsEnabled = false;
         SelectObjectButton.IsEnabled = false;
-        ResetPhotoButton.IsEnabled = false;
+        UndoButton.IsEnabled = false;
         Share3mfButton.IsEnabled = false;
         ShareStlButton.IsEnabled = false;
 
@@ -284,7 +399,7 @@ public partial class MainPage : ContentPage
             PickButton.IsEnabled = true;
             CropButton.IsEnabled = true;
             SelectObjectButton.IsEnabled = true;
-            ResetPhotoButton.IsEnabled = true;
+            UndoButton.IsEnabled = true;
             Share3mfButton.IsEnabled = _threeMfPath is not null;
             ShareStlButton.IsEnabled = _stlPath is not null;
         }
@@ -390,6 +505,9 @@ public partial class MainPage : ContentPage
             ProgressBar.IsAnimating = clamped is > 0 and < 100;
         });
     }
+
+    /// <summary>A photo state worth returning to: the photo itself plus the object mask that went with it.</summary>
+    private sealed record PhotoStep(LoadedPhoto Photo, SelectionMask? Keep, string Label);
 
     /// <summary>Maps the pipeline's 0-100 onto the 30-100 window left after model loading.</summary>
     private sealed class PipelineProgress(MainPage page) : IProgress<GenerationProgress>

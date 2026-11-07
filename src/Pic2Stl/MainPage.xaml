@@ -84,10 +84,10 @@
                         CornerRadius="10"
                         HeightRequest="38"
                         FontSize="13" />
-                <Button x:Name="ResetPhotoButton"
+                <Button x:Name="UndoButton"
                         Grid.Column="2"
-                        Text="Undo edits"
-                        Clicked="OnResetPhotoClicked"
+                        Text="Undo"
+                        Clicked="OnUndoClicked"
                         BackgroundColor="#1B2234"
                         TextColor="#8C97B5"
                         CornerRadius="10"
@@ -212,7 +212,7 @@
         <Grid x:Name="EditorPanel"
               IsVisible="False"
               BackgroundColor="#0B0F1A"
-              RowDefinitions="Auto,*,Auto"
+              RowDefinitions="Auto,*,Auto,Auto"
               RowSpacing="10"
               Padding="16,14,16,16">
 
@@ -233,7 +233,43 @@
                 <controls:SelectionOverlay x:Name="Overlay" />
             </Grid>
 
-            <Grid Grid.Row="2" ColumnDefinitions="*,*,*" ColumnSpacing="10">
+            <!-- Only for object mode: how strictly the outline follows the photo's colours -->
+            <VerticalStackLayout Grid.Row="2"
+                                 x:Name="EditorObjectOptions"
+                                 Spacing="2"
+                                 IsVisible="False">
+                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                    <Label Text="Colour match"
+                           TextColor="#8C97B5"
+                           FontSize="13"
+                           VerticalOptions="Center" />
+                    <Slider x:Name="EditorToleranceSlider"
+                            Grid.Column="1"
+                            Minimum="0.03"
+                            Maximum="0.5"
+                            Value="0.2"
+                            MaximumTrackColor="#2A3350"
+                            MinimumTrackColor="#4ADEA9"
+                            ThumbColor="#EEF2FF"
+                            ValueChanged="OnToleranceChanged"
+                            DragStarted="OnToleranceDragStarted"
+                            DragCompleted="OnToleranceDragCompleted" />
+                    <Label x:Name="EditorToleranceLabel"
+                           Grid.Column="2"
+                           Text="20%"
+                           TextColor="#DCE4FF"
+                           FontSize="13"
+                           WidthRequest="44"
+                           HorizontalTextAlignment="End"
+                           VerticalOptions="Center" />
+                </Grid>
+                <Label x:Name="EditorObjectStatus"
+                       Text="Tighter means less of the background is swept in."
+                       TextColor="#8C97B5"
+                       FontSize="11" />
+            </VerticalStackLayout>
+
+            <Grid Grid.Row="3" ColumnDefinitions="*,*,*" ColumnSpacing="10">
                 <Button Text="Redraw"
                         Clicked="OnEditorRedraw"
                         BackgroundColor="#2A3350"

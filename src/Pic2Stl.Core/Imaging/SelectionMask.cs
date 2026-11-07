@@ -1,3 +1,5 @@
+using Pic2Stl.Core.Colours;
+
 namespace Pic2Stl.Core.Imaging;
 
 /// <summary>
@@ -39,6 +41,28 @@ public sealed class SelectionMask
     public bool At(int x, int y) => _keep[Math.Clamp(y, 0, Height - 1) * Width + Math.Clamp(x, 0, Width - 1)];
 
     public int KeptCount => _keep.Count(kept => kept);
+
+    /// <summary>
+    /// The mask as an overlay image: the given colour where the object is kept, fully transparent elsewhere.
+    /// The editor draws it over the photo so the user can see the outline before committing to it.
+    /// </summary>
+    public ImageData Tint(Rgb colour, byte alpha = 90)
+    {
+        var pixels = new byte[Width * Height * 4];
+
+        for (var i = 0; i < _keep.Length; i++)
+        {
+            if (!_keep[i])
+                continue;
+
+            pixels[i * 4] = colour.R;
+            pixels[i * 4 + 1] = colour.G;
+            pixels[i * 4 + 2] = colour.B;
+            pixels[i * 4 + 3] = alpha;
+        }
+
+        return new ImageData(Width, Height, pixels);
+    }
 
     public bool IsEverything => KeptCount == _keep.Length;
 

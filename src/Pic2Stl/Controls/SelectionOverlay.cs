@@ -1,3 +1,5 @@
+using Microsoft.Maui.Graphics.Platform;
+
 namespace Pic2Stl.Controls;
 
 /// <summary>What the drawn box will be used for, which only changes how the overlay looks.</summary>
@@ -10,7 +12,8 @@ public enum PhotoEditMode
 /// <summary>
 /// Sits over the full-size photo and lets the user drag out a rectangle on it. The selection is kept as
 /// fractions of the photo, so the same box maps onto any screen size, and everything outside it is dimmed so
-/// the chosen area is obvious.
+/// the chosen area is obvious. In object mode it can also show the outline the colour match found, so the
+/// user sees what will actually be kept before they commit.
 /// </summary>
 public sealed class SelectionOverlay : GraphicsView, IDrawable
 {
@@ -21,13 +24,27 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
     private PointF? _dragStart;
     private bool _dragging;
 
+    private Microsoft.Maui.Graphics.IImage? _outline;
+    private RectF _outlineBounds;
+
     public SelectionOverlay()
     {
         Drawable = this;
 
-        StartInteraction += OnStartInteraction;
-        DragInteraction += OnDragInteraction;
-        EndInteraction += OnEndInteraction;
+        StartInteraction += (_, e) =>
+        {
+            if (e.Touches.Length > 0)
+                BeginBox(e.Touches[0]);
+        };
+
+        DragInteraction += (_, e) =>
+        {
+            if (e.Touches.Length > 0)
+                GrowBox(e.Touches[0]);
+        };
+
+        EndInteraction += (_, _) => EndBox();
+
         CancelInteraction += (_, _) =>
         {
             _dragStart = null;
@@ -46,6 +63,9 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
 
     public bool HasSelection => _selection is { Width: > 0.01f, Height: > 0.01f };
 
+    /// <summary>Where the photo itself is drawn inside the overlay, in overlay coordinates.</summary>
+    public RectF PictureBounds => PictureRect(ViewBounds());
+
     public event EventHandler? SelectionChanged;
 
     public void Start(int imageWidth, int imageHeight)
@@ -55,7 +75,8 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
         _selection = null;
         _dragStart = null;
         _dragging = false;
-        Invalidate();
+        SetOutline(null, default);
+        SelectionChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void Clear()
@@ -63,29 +84,57 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
         _selection = null;
         _dragStart = null;
         _dragging = false;
+        SetOutline(null, default);
         Invalidate();
         SelectionChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private void OnStartInteraction(object? sender, TouchEventArgs e)
+    /// <summary>
+    /// The outline the colour match found, as a PNG to draw over the photo plus the photo fractions it covers.
+    /// Passing null removes it, which is what crop mode and a tap want.
+    /// </summary>
+    public void SetOutline(byte[]? png, RectF bounds)
     {
-        if (e.Touches.Length == 0)
-            return;
+        _outline?.Dispose();
+        _outline = null;
+        _outlineBounds = bounds;
 
-        _dragStart = ToFraction(e.Touches[0]);
+        if (png is null || png.Length == 0)
+        {
+            Invalidate();
+            return;
+        }
+
+        try
+        {
+            _outline = PlatformImage.FromStream(new MemoryStream(png));
+        }
+        catch (Exception ex)
+        {
+            // A decorative preview is not worth breaking the editor over; the box alone still works.
+            System.Diagnostics.Debug.WriteLine($"Outline preview could not be decoded: {ex.Message}");
+        }
+
+        Invalidate();
+    }
+
+    /// <summary>Starts a drag at a point in the overlay's own coordinates.</summary>
+    public void BeginBox(PointF point)
+    {
+        _dragStart = ToFraction(point);
         _dragging = false;
     }
 
-    private void OnDragInteraction(object? sender, TouchEventArgs e)
+    /// <summary>Extends the drag; a few pixels of movement is treated as a tap, not a box.</summary>
+    public void GrowBox(PointF point)
     {
-        if (_dragStart is not { } start || e.Touches.Length == 0)
+        if (_dragStart is not { } start)
             return;
 
-        var current = ToFraction(e.Touches[0]);
+        var current = ToFraction(point);
         var bounds = ViewBounds();
         var picture = PictureRect(bounds);
 
-        // A few pixels of movement is a tap, not a drag; only a real drag replaces the selection.
         if (!_dragging)
         {
             var dx = (current.X - start.X) * picture.Width;
@@ -97,11 +146,13 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
         }
 
         _selection = Normalise(start, current);
+        SetOutline(null, default);
         Invalidate();
         SelectionChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private void OnEndInteraction(object? sender, TouchEventArgs e)
+    /// <summary>Finishes the drag, or clears the box if the gesture was only a tap.</summary>
+    public void EndBox()
     {
         if (!_dragging)
         {
@@ -139,6 +190,19 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
         canvas.FillRectangle(picture.Left, top + height, picture.Width, picture.Bottom - (top + height));
         canvas.FillRectangle(picture.Left, top, left - picture.Left, height);
         canvas.FillRectangle(left + width, top, picture.Right - (left + width), height);
+
+        // The found object glows inside the box, so a weak colour match is visible before it is applied.
+        if (_outline is not null)
+        {
+            var outlineLeft = picture.Left + _outlineBounds.X * picture.Width;
+            var outlineTop = picture.Top + _outlineBounds.Y * picture.Height;
+            canvas.DrawImage(
+                _outline,
+                outlineLeft,
+                outlineTop,
+                _outlineBounds.Width * picture.Width,
+                _outlineBounds.Height * picture.Height);
+        }
 
         var accent = Mode == PhotoEditMode.Object ? ObjectColour : CropColour;
         canvas.StrokeColor = accent;

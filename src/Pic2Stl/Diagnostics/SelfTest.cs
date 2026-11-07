@@ -156,7 +156,7 @@ internal static class SelfTest
     }
 
     /// <summary>A red subject on a blue field, so the object selector has a clear edge to follow.</summary>
-    private static ImageData SubjectPhoto()
+    internal static ImageData SubjectPhoto()
     {
         const int width = 200, height = 150;
         var pixels = new byte[width * height * 4];
