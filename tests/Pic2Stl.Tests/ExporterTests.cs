@@ -325,6 +325,19 @@ public class ThreeMfWriterTests
     }
 
     [Test]
+    public void Write_ShipsNoProjectSettingsSoTheSlicerKeepsItsOwn()
+    {
+        var (mesh, palette) = Sample(4);
+        using var archive = Open(mesh, palette);
+
+        Assert.That(
+            archive.Entries.Select(entry => entry.FullName),
+            Has.None.EqualTo("Metadata/project_settings.config"),
+            "A partial project settings file overrides the slicer's print settings; it produced a G92 E0 " +
+            "validation error in ElegooSlicer.");
+    }
+
+    [Test]
     public void Write_RejectsEmptyInput()
     {
         var palette = new Palette(new[] { new Rgb(1, 1, 1) });
