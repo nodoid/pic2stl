@@ -133,6 +133,45 @@ public class ThreeMfWriterTests
     }
 
     [Test]
+    public void Write_NamesTheMaterialsAsTheUserDefinedThem()
+    {
+        var (mesh, palette) = Sample(4);
+        string[] names = ["Skin", "Hair", "Shirt", "Shoes"];
+        var bases = BaseMaterials(ReadModel(mesh, palette, names));
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(bases.Select(b => b.Attribute("name")!.Value), Is.EqualTo(names));
+            Assert.That(
+                bases.Select(b => b.Attribute("displaycolor")!.Value),
+                Is.EqualTo(palette.Colours.Select(colour => colour.ToHex())),
+                "The 3MF must carry the colour the user defined, not the one it was quantised from.");
+        });
+    }
+
+    [Test]
+    public void Write_FallsBackToNumberedNamesForUnnamedColours()
+    {
+        var (mesh, palette) = Sample(4);
+        var bases = BaseMaterials(ReadModel(mesh, palette, ["", "  ", "Shoes", ""]));
+
+        Assert.That(
+            bases.Select(b => b.Attribute("name")!.Value),
+            Is.EqualTo(new[] { "Colour 1", "Colour 2", "Shoes", "Colour 4" }));
+    }
+
+    [Test]
+    public void Write_RejectsANameListThatDoesNotMatchThePalette()
+    {
+        var palette = new Palette(new[] { new Rgb(10, 20, 30) });
+        var mesh = SolidMesher.Build(DepthMap.Constant(8, 8, 0.5f), null);
+
+        Assert.That(
+            () => ThreeMfWriter.ToBytes(mesh, palette.Colours, "test", ["one", "two"]),
+            Throws.ArgumentException);
+    }
+
+    [Test]
     public void Write_SixteenColourPaletteIsSupported()
     {
         var (mesh, palette) = Sample(16);
@@ -248,6 +287,44 @@ public class ThreeMfWriterTests
     }
 
     [Test]
+    public void Write_GivesEveryColourPartItsOwnSpoolForTheSlicer()
+    {
+        var (mesh, palette) = Sample(4);
+        string[] names = ["Skin", "Hair", "Shirt", "Shoes"];
+        using var archive = Open(mesh, palette, names);
+
+        var config = ReadXml(archive, "Metadata/model_settings.config").Root!;
+        var parts = config.Elements(XName.Get("object")).Single().Elements(XName.Get("part")).ToList();
+
+        static string Meta(XElement part, string key) =>
+            part.Elements(XName.Get("metadata")).Single(m => m.Attribute("key")!.Value == key)
+                .Attribute("value")!.Value;
+
+        Assert.Multiple(() =>
+        {
+            // Slicers ignore a 3MF's own material list, so the spool assignment has to be spelled out here.
+            Assert.That(parts, Has.Count.EqualTo(4));
+            Assert.That(parts.Select(p => p.Attribute("id")!.Value), Is.EqualTo(new[] { "2", "3", "4", "5" }));
+            Assert.That(parts.Select(p => Meta(p, "extruder")), Is.EqualTo(new[] { "1", "2", "3", "4" }));
+            Assert.That(parts.Select(p => Meta(p, "name")), Is.EqualTo(names));
+            Assert.That(config.Elements(XName.Get("plate")).Single()
+                .Element(XName.Get("model_instance")), Is.Not.Null);
+        });
+    }
+
+    [Test]
+    public void Write_SingleColourNeedsNoPartList()
+    {
+        var palette = new Palette(new[] { new Rgb(200, 30, 30) });
+        var mesh = SolidMesher.Build(DepthMap.Constant(8, 8, 0.5f), null);
+        using var archive = Open(mesh, palette);
+
+        var config = ReadXml(archive, "Metadata/model_settings.config").Root!;
+
+        Assert.That(config.Elements(XName.Get("object")).Single().Elements(XName.Get("part")), Is.Empty);
+    }
+
+    [Test]
     public void Write_RejectsEmptyInput()
     {
         var palette = new Palette(new[] { new Rgb(1, 1, 1) });
@@ -262,12 +339,16 @@ public class ThreeMfWriterTests
 
     private static XElement Resources(XElement model) => model.Element(XName.Get("resources", Core))!;
 
-    private static ZipArchive Open(Mesh mesh, Palette palette) =>
-        new(new MemoryStream(ThreeMfWriter.ToBytes(mesh, palette.Colours)), ZipArchiveMode.Read);
+    private static List<XElement> BaseMaterials(XElement model) =>
+        Resources(model).Element(XName.Get("basematerials", Core))!
+            .Elements(XName.Get("base", Core)).ToList();
 
-    private static XElement ReadModel(Mesh mesh, Palette palette)
+    private static ZipArchive Open(Mesh mesh, Palette palette, IReadOnlyList<string>? names = null) =>
+        new(new MemoryStream(ThreeMfWriter.ToBytes(mesh, palette.Colours, "test", names)), ZipArchiveMode.Read);
+
+    private static XElement ReadModel(Mesh mesh, Palette palette, IReadOnlyList<string>? names = null)
     {
-        using var archive = Open(mesh, palette);
+        using var archive = Open(mesh, palette, names);
         return ReadXml(archive, "3D/3dmodel.model").Root!;
     }
 

@@ -897,12 +897,13 @@ public partial class MainPage : ContentPage
         var stl = Path.Combine(directory, $"pic2stl-{stamp}.stl");
 
         var palette = _printColours.Count > 0 ? _printColours : result.Palette.Colours;
-        var mesh = result.Mesh;
+        var names = _printNames.Count == palette.Count ? _printNames : null;
 
         await Task.Run(() =>
         {
+            // The 3MF is sliced colour by colour, so it wants the mesh whose colours each close as a solid.
             using (var stream = File.Create(threeMf))
-                ThreeMfWriter.Write(stream, mesh, palette, "Pic2Stl model");
+                ThreeMfWriter.Write(stream, result.PrintMesh, palette, "Pic2Stl model", names);
 
             using (var stream = File.Create(stl))
                 StlWriter.Write(stream, result.Mesh, "Pic2Stl model");
@@ -936,13 +937,14 @@ public partial class MainPage : ContentPage
         // Written at share time so the file carries the colours as the user last defined them.
         if (_result is not null && _threeMfPath is { } path)
         {
-            var mesh = _result.Mesh;
+            var mesh = _result.PrintMesh;
             var palette = _printColours.Count > 0 ? _printColours : _result.Palette.Colours;
+            var names = _printNames.Count == palette.Count ? _printNames : null;
 
             await Task.Run(() =>
             {
                 using var stream = File.Create(path);
-                ThreeMfWriter.Write(stream, mesh, palette, "Pic2Stl model");
+                ThreeMfWriter.Write(stream, mesh, palette, "Pic2Stl model", names);
             });
         }
 

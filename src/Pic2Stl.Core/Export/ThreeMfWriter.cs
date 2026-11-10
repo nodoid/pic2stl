@@ -28,7 +28,12 @@ public static class ThreeMfWriter
         </Relationships>
         """;
 
-    public static void Write(Stream stream, Mesh mesh, IReadOnlyList<Rgb> palette, string title = "Pic2Stl model")
+    public static void Write(
+        Stream stream,
+        Mesh mesh,
+        IReadOnlyList<Rgb> palette,
+        string title = "Pic2Stl model",
+        IReadOnlyList<string>? colourNames = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
         ArgumentNullException.ThrowIfNull(mesh);
@@ -40,6 +45,22 @@ public static class ThreeMfWriter
         if (palette.Count == 0)
             throw new ArgumentException("A 3MF needs at least one material.", nameof(palette));
 
+        if (colourNames is not null && colourNames.Count != palette.Count)
+            throw new ArgumentException("Give every print colour a name, or none.", nameof(colourNames));
+
+        var usedMaterials = mesh.TrianglesPerMaterial().Keys.OrderBy(i => i).ToArray();
+        if (usedMaterials.Any(m => m >= palette.Count))
+            throw new InvalidOperationException("A triangle references a material that is not in the palette.");
+
+        // Materials id 1, one mesh object per colour from id 2 upwards, then the assembly object.
+        const int materialsId = 1;
+        var objectIds = new Dictionary<byte, int>();
+        var nextId = 2;
+        foreach (var material in usedMaterials)
+            objectIds[material] = nextId++;
+
+        var assemblyId = nextId;
+
         using var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true);
 
         WriteEntry(archive, "[Content_Types].xml", ContentTypesXml);
@@ -48,13 +69,22 @@ public static class ThreeMfWriter
         var modelEntry = archive.CreateEntry("3D/3dmodel.model", CompressionLevel.Optimal);
         // The entry stream must be closed so the deflate stream flushes into the archive.
         using (var entryStream = modelEntry.Open())
-            WriteModel(entryStream, mesh, palette, title);
+            WriteModel(entryStream, mesh, palette, title, colourNames, usedMaterials, materialsId, objectIds,
+                assemblyId);
+
+        var settingsEntry = archive.CreateEntry("Metadata/model_settings.config", CompressionLevel.Optimal);
+        using (var entryStream = settingsEntry.Open())
+            WriteModelSettings(entryStream, title, usedMaterials, objectIds, assemblyId, colourNames);
     }
 
-    public static byte[] ToBytes(Mesh mesh, IReadOnlyList<Rgb> palette, string title = "Pic2Stl model")
+    public static byte[] ToBytes(
+        Mesh mesh,
+        IReadOnlyList<Rgb> palette,
+        string title = "Pic2Stl model",
+        IReadOnlyList<string>? colourNames = null)
     {
         using var buffer = new MemoryStream();
-        Write(buffer, mesh, palette, title);
+        Write(buffer, mesh, palette, title, colourNames);
         return buffer.ToArray();
     }
 
@@ -66,7 +96,16 @@ public static class ThreeMfWriter
         writer.Write(content);
     }
 
-    private static void WriteModel(Stream stream, Mesh mesh, IReadOnlyList<Rgb> palette, string title)
+    private static void WriteModel(
+        Stream stream,
+        Mesh mesh,
+        IReadOnlyList<Rgb> palette,
+        string title,
+        IReadOnlyList<string>? colourNames,
+        byte[] usedMaterials,
+        int materialsId,
+        IReadOnlyDictionary<byte, int> objectIds,
+        int assemblyId)
     {
         var settings = new XmlWriterSettings
         {
@@ -88,27 +127,14 @@ public static class ThreeMfWriter
         WriteMetadata(xml, "Description", "AI depth-derived solid generated on device with Depth Anything V2.");
         WriteMetadata(xml, "Application", "Pic2Stl");
 
-        var usedMaterials = mesh.TrianglesPerMaterial().Keys.OrderBy(i => i).ToArray();
-        if (usedMaterials.Any(m => m >= palette.Count))
-            throw new InvalidOperationException("A triangle references a material that is not in the palette.");
-
         xml.WriteStartElement("resources", ModelNamespace);
-
-        // Materials id 1, objects from id 2 upwards, then the assembly object.
-        const int materialsId = 1;
-        var objectIds = new Dictionary<byte, int>();
-        var nextId = 2;
-        foreach (var material in usedMaterials)
-            objectIds[material] = nextId++;
-
-        var assemblyId = nextId;
 
         xml.WriteStartElement("basematerials", ModelNamespace);
         xml.WriteAttributeString("id", materialsId.ToString(CultureInfo.InvariantCulture));
         for (var i = 0; i < palette.Count; i++)
         {
             xml.WriteStartElement("base", ModelNamespace);
-            xml.WriteAttributeString("name", $"Colour {i + 1}");
+            xml.WriteAttributeString("name", ColourName(colourNames, i));
             xml.WriteAttributeString("displaycolor", palette[i].ToHex());
             xml.WriteEndElement();
         }
@@ -148,6 +174,74 @@ public static class ThreeMfWriter
         xml.WriteEndElement();
 
         xml.WriteEndElement(); // model
+        xml.WriteEndDocument();
+    }
+
+    /// <summary>
+    /// The colour and spool assignments the slicing apps actually read. They ignore a 3MF's own material list, so
+    /// without this part every colour arrives as one default-coloured part. No print settings are written: the
+    /// slicer keeps the profile the user already chose.
+    /// </summary>
+    private static void WriteModelSettings(
+        Stream stream,
+        string title,
+        byte[] usedMaterials,
+        IReadOnlyDictionary<byte, int> objectIds,
+        int assemblyId,
+        IReadOnlyList<string>? colourNames)
+    {
+        var settings = new XmlWriterSettings
+        {
+            Encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+            Indent = true,
+            IndentChars = " ",
+            NewLineChars = "\n",
+        };
+
+        using var xml = XmlWriter.Create(stream, settings);
+
+        var builtObjectId = usedMaterials.Length > 1 ? assemblyId : objectIds[usedMaterials[0]];
+        var builtObject = builtObjectId.ToString(CultureInfo.InvariantCulture);
+
+        xml.WriteStartDocument();
+        xml.WriteStartElement("config");
+
+        xml.WriteStartElement("object");
+        xml.WriteAttributeString("id", builtObject);
+        WriteSetting(xml, "name", title);
+        WriteSetting(xml, "extruder", "1");
+
+        if (usedMaterials.Length > 1)
+        {
+            for (var i = 0; i < usedMaterials.Length; i++)
+            {
+                var spool = (i + 1).ToString(CultureInfo.InvariantCulture);
+
+                // Part ids run from 2: the slicer reads id 1 as the object itself, so a part numbered from 1
+                // lands on the next colour and leaves the last one unassigned.
+                xml.WriteStartElement("part");
+                xml.WriteAttributeString("id", (i + 2).ToString(CultureInfo.InvariantCulture));
+                xml.WriteAttributeString("subtype", "normal_part");
+                WriteSetting(xml, "name", ColourName(colourNames, usedMaterials[i]));
+                WriteSetting(xml, "extruder", spool);
+                xml.WriteEndElement();
+            }
+        }
+
+        xml.WriteEndElement(); // object
+
+        xml.WriteStartElement("plate");
+        WriteSetting(xml, "plater_id", "1");
+        WriteSetting(xml, "plater_name", "");
+        WriteSetting(xml, "locked", "false");
+        xml.WriteStartElement("model_instance");
+        WriteSetting(xml, "object_id", builtObject);
+        WriteSetting(xml, "instance_id", "0");
+        WriteSetting(xml, "identify_id", "1");
+        xml.WriteEndElement();
+        xml.WriteEndElement(); // plate
+
+        xml.WriteEndElement(); // config
         xml.WriteEndDocument();
     }
 
@@ -218,11 +312,24 @@ public static class ThreeMfWriter
         xml.WriteEndElement(); // object
     }
 
+    /// <summary>What the slicer will call this spool: the user's name, or a neutral default.</summary>
+    private static string ColourName(IReadOnlyList<string>? names, int index) =>
+        names is { } given && !string.IsNullOrWhiteSpace(given[index]) ? given[index].Trim() : $"Colour {index + 1}";
+
     private static void WriteMetadata(XmlWriter xml, string name, string value)
     {
         xml.WriteStartElement("metadata", ModelNamespace);
         xml.WriteAttributeString("name", name);
         xml.WriteString(value);
+        xml.WriteEndElement();
+    }
+
+    /// <summary>A slicer setting: the config files spell metadata as key/value attributes, not as text.</summary>
+    private static void WriteSetting(XmlWriter xml, string key, string value)
+    {
+        xml.WriteStartElement("metadata");
+        xml.WriteAttributeString("key", key);
+        xml.WriteAttributeString("value", value);
         xml.WriteEndElement();
     }
 

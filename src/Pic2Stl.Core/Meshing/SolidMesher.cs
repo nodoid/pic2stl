@@ -26,6 +26,24 @@ public sealed class SolidMeshOptions
     /// mirrored back rather than a sheer wall behind a flat panel. Zero keeps a hard edge.
     /// </summary>
     public float EdgeFade { get; init; } = 0.03f;
+
+    /// <summary>
+    /// Walls the seams between print colours, so each colour on its own is a closed solid a slicer can give a
+    /// spool to. The shared seam walls make the mesh as a whole non-manifold, so only the colour-by-colour 3MF
+    /// is built this way; the STL and the preview keep the single closed solid.
+    /// </summary>
+    public bool SealColours { get; init; }
+
+    /// <summary>The same solid, built so that every print colour closes on its own.</summary>
+    public SolidMeshOptions SealingColours() => new()
+    {
+        WidthMm = WidthMm,
+        ReliefMm = ReliefMm,
+        BackRatio = BackRatio,
+        MinThicknessMm = MinThicknessMm,
+        EdgeFade = EdgeFade,
+        SealColours = true,
+    };
 }
 
 /// <summary>
@@ -192,23 +210,24 @@ public static class SolidMesher
 
                 var material = MaterialAt(x, y);
 
-                if (NeedsWall(x, y - 1))
+                if (NeedsWall(x, y - 1, material))
                     AddWall(mesh, width, backOffset, x, y, x + 1, y, material);
 
-                if (NeedsWall(x + 1, y))
+                if (NeedsWall(x + 1, y, material))
                     AddWall(mesh, width, backOffset, x + 1, y, x + 1, y + 1, material);
 
-                if (NeedsWall(x, y + 1))
+                if (NeedsWall(x, y + 1, material))
                     AddWall(mesh, width, backOffset, x + 1, y + 1, x, y + 1, material);
 
-                if (NeedsWall(x - 1, y))
+                if (NeedsWall(x - 1, y, material))
                     AddWall(mesh, width, backOffset, x, y + 1, x, y, material);
             }
         }
 
         return mesh;
 
-        bool NeedsWall(int x, int y) => !IsCell(x, y);
+        bool NeedsWall(int x, int y, byte material) =>
+            !IsCell(x, y) || (options.SealColours && MaterialAt(x, y) != material);
     }
 
     /// <summary>One quad of rim wall: two triangles joining the front edge to the back edge.</summary>

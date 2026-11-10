@@ -197,6 +197,38 @@ public class MeshGenerationPipelineTests
     }
 
     [Test]
+    public async Task GenerateAsync_ClosesEveryColourInTheMeshThe3mfSplits()
+    {
+        var pipeline = new MeshGenerationPipeline(new FixedDepthEstimator());
+        var options = new GenerationOptions { ColourCount = 4, WidthMm = 70, ExportDetail = 40, PreviewDetail = 16 };
+
+        var result = await pipeline.GenerateAsync(TestImages.FourQuadrants(), options);
+
+        // A slicer gives each colour its own spool only if that colour is a closed solid on its own.
+        Assert.That(result.PrintMesh.TrianglesPerMaterial().Count, Is.GreaterThan(1));
+
+        foreach (var material in result.PrintMesh.TrianglesPerMaterial().Keys)
+        {
+            var colour = new Mesh();
+            var remap = new Dictionary<int, int>();
+            foreach (var t in result.PrintMesh.Triangles.Where(t => t.Material == material))
+                colour.AddTriangle(Index(t.A), Index(t.B), Index(t.C), material);
+
+            TestImages.AssertWatertight(colour);
+
+            int Index(int vertex)
+            {
+                if (remap.TryGetValue(vertex, out var existing))
+                    return existing;
+
+                var index = colour.AddVertex(result.PrintMesh.VertexAt(vertex));
+                remap[vertex] = index;
+                return index;
+            }
+        }
+    }
+
+    [Test]
     public async Task GenerateAsync_ReportsProgressFromStartToHundred()
     {
         var reports = new ProgressCollector<GenerationProgress>();

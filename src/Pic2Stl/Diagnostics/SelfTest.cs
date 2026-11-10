@@ -138,7 +138,7 @@ internal static class SelfTest
                 StlWriter.Write(stream, offline.Mesh, "selftest");
 
             using (var stream = File.Create(threeMfPath))
-                ThreeMfWriter.Write(stream, offline.Mesh, offline.Palette.Colours, "selftest");
+                ThreeMfWriter.Write(stream, offline.PrintMesh, offline.Palette.Colours, "selftest");
 
             Log($"stl={new FileInfo(stlPath).Length} 3mf={new FileInfo(threeMfPath).Length}");
 

@@ -27,6 +27,53 @@ public class SolidMesherTests
     }
 
     [Test]
+    public void Build_ClosesEveryColourSoASlicerCanGiveItItsOwnSpool()
+    {
+        const int width = 20, height = 20;
+        var indices = new byte[width * height];
+        for (var y = 0; y < height; y++)
+            for (var x = 0; x < width; x++)
+                indices[y * width + x] = (byte)(x < width / 2 ? 0 : 1);
+
+        var mesh = SolidMesher.Build(
+            DepthMap.Constant(width, height),
+            new MaterialMap(width, height, indices),
+            Options.SealingColours());
+
+        // Splitting a solid by material leaves each colour open along the seam unless the seam is walled.
+        foreach (var material in new byte[] { 0, 1 })
+        {
+            var colour = SubMesh(mesh, material);
+            Assert.That(colour.Triangles, Is.Not.Empty);
+            TestImages.AssertWatertight(colour);
+            TestImages.AssertOutwardFacing(colour);
+        }
+    }
+
+    [Test]
+    public void Build_LeavesASingleColourSolidUnchanged()
+    {
+        var depth = DepthMap.Constant(12, 10);
+        var plain = SolidMesher.Build(depth, null, Options);
+        var tagged = SolidMesher.Build(depth, new MaterialMap(12, 10, new byte[120]), Options);
+
+        Assert.That(tagged.Triangles, Has.Count.EqualTo(plain.Triangles.Count));
+    }
+
+    [Test]
+    public void Build_KeepsTheSingleSolidWatertightUnlessSealingColoursIsAskedFor()
+    {
+        var depth = DepthMap.Constant(12, 10);
+        var indices = new byte[120];
+        for (var i = 0; i < indices.Length; i++)
+            indices[i] = (byte)(i % 2);
+
+        var mesh = SolidMesher.Build(depth, new MaterialMap(12, 10, indices), Options);
+
+        TestImages.AssertWatertight(mesh);
+    }
+
+    [Test]
     public void Build_VertexAndTriangleCountsMatchGrid()
     {
         const int width = 24, height = 18;
@@ -193,6 +240,28 @@ public class SolidMesherTests
     public void Build_RejectsGridSmallerThanTwoByTwo()
     {
         Assert.That(() => SolidMesher.Build(DepthMap.Constant(1, 4), null, Options), Throws.ArgumentException);
+    }
+
+    /// <summary>The triangles of one material, rebuilt as a mesh of its own.</summary>
+    private static Mesh SubMesh(Mesh mesh, byte material)
+    {
+        var sub = new Mesh();
+        var remap = new Dictionary<int, int>();
+
+        foreach (var t in mesh.Triangles.Where(t => t.Material == material))
+            sub.AddTriangle(Index(t.A), Index(t.B), Index(t.C), material);
+
+        return sub;
+
+        int Index(int vertex)
+        {
+            if (remap.TryGetValue(vertex, out var existing))
+                return existing;
+
+            var index = sub.AddVertex(mesh.VertexAt(vertex));
+            remap[vertex] = index;
+            return index;
+        }
     }
 
     [Test]

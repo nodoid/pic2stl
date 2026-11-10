@@ -65,6 +65,7 @@ public readonly record struct GenerationProgress(int Percent, string Stage);
 /// <summary>Everything the UI and the exporters need from one run.</summary>
 public sealed record GenerationResult(
     Mesh Mesh,
+    Mesh PrintMesh,
     Mesh PreviewMesh,
     Palette Palette,
     DepthMap Depth,
@@ -171,6 +172,16 @@ public sealed class MeshGenerationPipeline
                 () => SolidMesher.Build(exportDepth, quantised.Map, meshOptions, exportMask), cancellationToken)
             .ConfigureAwait(false);
 
+        // The 3MF is sliced colour by colour, so its colours have to be closed solids of their own; the single
+        // solid above stays the one piece the STL and the stats describe.
+        var printMesh = quantised.Palette.Count > 1
+            ? await Task.Run(
+                    () => SolidMesher.Build(
+                        exportDepth, quantised.Map, meshOptions.SealingColours(), exportMask),
+                    cancellationToken)
+                .ConfigureAwait(false)
+            : mesh;
+
         cancellationToken.ThrowIfCancellationRequested();
         Report(88, "Preparing 3D view");
 
@@ -192,7 +203,7 @@ public sealed class MeshGenerationPipeline
         Report(100, "Done");
 
         return new GenerationResult(
-            mesh, previewMesh, quantised.Palette, smoothed, _depthEstimator.EngineName, elapsed);
+            mesh, printMesh, previewMesh, quantised.Palette, smoothed, _depthEstimator.EngineName, elapsed);
     }
 
     /// <summary>Sets depth outside the object to zero, so the boundary of the trimmed solid sits at the base.</summary>
