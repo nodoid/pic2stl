@@ -27,6 +27,61 @@ No photo leaves the device and nothing is sent to a service.
   what slicers such as ElegooSlicer and Orca actually read. No print settings are
   written into the file, so the profile you chose is left alone.
 
+## Using it
+
+1. **Take a picture**, or **Use a photo from the device**.
+2. **Select object** and tap the subject. The found outline is drawn over the
+   photo; the **Colour match** slider decides how far it follows the object into
+   its background, and dragging the outline adds or trims edges. **Apply** keeps
+   it. **Crop** is there when a plain rectangle is all you need. **Undo** takes
+   back one edit at a time.
+3. **Print colours** sets how many colours to print (1 to 16, four by default),
+   and lets you pick and name each one to match the spools you actually load. The
+   photo is mapped onto those colours, not onto colours invented from the image.
+4. **Width** sets the size across the finished object: 30 to 150 mm, 80 mm by
+   default. Height follows the photo's aspect ratio.
+5. **Generate 3D model**, look at it (drag to rotate, pinch to zoom), then
+   **Share .3mf** or **Share .stl**. Files are also kept in the app's own
+   `exports` folder.
+
+## What you get
+
+| File | Contents |
+| --- | --- |
+| `.stl` | One watertight solid. No colour, no parts. |
+| `.3mf` | The same model split by colour, every colour closed as its own solid, with the spool assignment written in. |
+
+Multi-colour 3MFs carry one mesh object per colour plus an assembly object, so
+colours stay in place instead of being scattered across the plate.
+`Metadata/model_settings.config` maps each part to an extruder, which is what
+Orca and ElegooSlicer read to put each colour on its own spool. The file
+contains no `project_settings.config` on purpose: a partial profile overrides
+whatever the slicer already has.
+
+## Slicing the result
+
+- Load the 3MF and you should see one part per colour. Set up that many
+  filaments; colour 1 goes to spool 1 and so on.
+- Do not merge or "repair" the parts, and decline any offer to import print
+  settings from the file. Leave the profile you already use.
+- If the slicer refuses with *"Relative extruder addressing requires resetting
+  the extruder position ... Add G92 E0 to layer_gcode"*, the model is not at
+  fault: that is a printer profile using relative E with no per-layer reset.
+  Use a profile with absolute E, or add `G92 E0` to its before-layer-change
+  g-code. Do not add it to an absolute-E printer, where zeroing the counter
+  mid-print would skip extrusion at every layer.
+
+## What it cannot know
+
+- Depth comes from a single photo, so it is a good guess rather than a
+  measurement. Reflections, glass, thin structures and flat-background cut-outs
+  mislead it.
+- The back of the model is guessed: the relief is mirrored at 45% and closed by
+  a rim, on a base at least 2.5% of the width thick.
+- Selection finds one subject at a time. A busy scene needs the edge brush, or
+  a crop.
+- Output is a static, solid mesh: no hollowing, no supports, no print settings.
+
 ## How it works
 
 ```
