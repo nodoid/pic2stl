@@ -6,6 +6,9 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <RootNamespace>Pic2Stl.Core</RootNamespace>
+    <Authors>Paul F. Johnson</Authors>
+    <Copyright>© 2026 Paul F. Johnson. Released under the DILLIGAF licence.</Copyright>
+    <PackageLicenseExpression>LicenseRef-DILLIGAF</PackageLicenseExpression>
   </PropertyGroup>
 
   <ItemGroup>

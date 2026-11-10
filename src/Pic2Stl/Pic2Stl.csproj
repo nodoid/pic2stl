@@ -23,6 +23,13 @@
 		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
 		<ApplicationVersion>1</ApplicationVersion>
 
+		<!-- Author and licence, carried into the built assembly and the app bundle -->
+		<Authors>Paul F. Johnson</Authors>
+		<Company>Paul F. Johnson</Company>
+		<Product>Pic2Stl</Product>
+		<Copyright>© 2026 Paul F. Johnson. Released under the DILLIGAF licence.</Copyright>
+		<PackageLicenseExpression>LicenseRef-DILLIGAF</PackageLicenseExpression>
+
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">18.0</SupportedOSPlatformVersion>
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">32.0</SupportedOSPlatformVersion>
 
