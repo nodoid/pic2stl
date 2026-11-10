@@ -154,6 +154,20 @@ public partial class MainPage
             OnPaletteDone(null, EventArgs.Empty);
             await Task.Delay(300);
             log.Add($"palette closed visible={PaletteLayer.IsVisible}");
+
+            // The result screen is part of the look too: generate with whichever estimator the app finds, then
+            // wait for the viewer to be given the model before capturing it.
+            OnGenerateClicked(null, EventArgs.Empty);
+
+            // The exports are written before the viewer is given the model, so wait for the stats line that
+            // ShowResult sets rather than for the result itself.
+            for (var waited = 0; waited < 120 && string.IsNullOrEmpty(StatsLabel.Text); waited++)
+                await Task.Delay(250);
+
+            log.Add($"result ready={_result is not null} tris={_result?.TriangleCount} " +
+                    $"stats='{StatsLabel.Text}'");
+            await Task.Delay(1200);
+            await CaptureAsync(log, documents, "snap-16-model");
         }
         catch (Exception ex)
         {

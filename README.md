@@ -8,6 +8,26 @@ separate spools.
 Everything runs on the phone: the depth estimation, the meshing and the export.
 No photo leaves the device and nothing is sent to a service.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="25%"><img src="docs/screenshots/01-home.png" alt="The home screen with a photo loaded"></td>
+    <td width="25%"><img src="docs/screenshots/02-select-object.png" alt="Selecting an object, with its outline drawn over the photo"></td>
+    <td width="25%"><img src="docs/screenshots/03-print-colours.png" alt="The print colours sheet, listing four colours"></td>
+    <td width="25%"><img src="docs/screenshots/04-model.png" alt="The generated 3D model in the viewer, with its statistics"></td>
+  </tr>
+  <tr>
+    <td>Choose a photo</td>
+    <td>Tap the object; drag its outline to trim</td>
+    <td>Pick and name your filaments</td>
+    <td>Generate, then share .3mf or .stl</td>
+  </tr>
+</table>
+
+Captured on an iPhone by the app's debug walkthrough (`P2S_SNAPSHOT=1`), which
+runs on a synthetic red-on-blue test photo so every run looks the same.
+
 ## What it does
 
 - **Pick the object with a tap.** The object is grown from the pixel you touch,
