@@ -38,9 +38,85 @@ public sealed class SelectionMask
         return keep;
     }
 
-    public bool At(int x, int y) => _keep[Math.Clamp(y, 0, Height - 1) * Width + Math.Clamp(x, 0, Width - 1)];
+    /// <summary>The kept value at a pixel; points outside the mask count as background, so the border is an edge.</summary>
+    public bool At(int x, int y) =>
+        x >= 0 && x < Width && y >= 0 && y < Height && _keep[y * Width + x];
 
     public int KeptCount => _keep.Count(kept => kept);
+
+    /// <summary>
+    /// The edge of the kept region as line segments in mask pixel coordinates, so the editor can draw the
+    /// object's actual outline instead of the rectangle it was found in. Neighbouring pixel edges are merged
+    /// into runs, so a straight side is one segment rather than hundreds.
+    /// </summary>
+    public IReadOnlyList<(float X0, float Y0, float X1, float Y1)> Outline()
+    {
+        var segments = new List<(float X0, float Y0, float X1, float Y1)>();
+
+        for (var y = 0; y < Height; y++)
+        {
+            AddHorizontalRuns(segments, y, -1);
+            AddHorizontalRuns(segments, y, 1);
+        }
+
+        for (var x = 0; x < Width; x++)
+        {
+            AddVerticalRuns(segments, x, -1);
+            AddVerticalRuns(segments, x, 1);
+        }
+
+        return segments;
+    }
+
+    /// <summary>Adds the runs of row <paramref name="y"/> whose neighbour <paramref name="dy"/> is missing.</summary>
+    private void AddHorizontalRuns(
+        List<(float X0, float Y0, float X1, float Y1)> segments, int y, int dy)
+    {
+        var line = y + (dy > 0 ? 1 : 0);
+        var x = 0;
+
+        while (x < Width)
+        {
+            if (!IsEdge(x, y, 0, dy))
+            {
+                x++;
+                continue;
+            }
+
+            var start = x;
+            while (x < Width && IsEdge(x, y, 0, dy))
+                x++;
+
+            segments.Add((start, line, x, line));
+        }
+    }
+
+    /// <summary>Adds the runs of column <paramref name="x"/> whose neighbour <paramref name="dx"/> is missing.</summary>
+    private void AddVerticalRuns(
+        List<(float X0, float Y0, float X1, float Y1)> segments, int x, int dx)
+    {
+        var line = x + (dx > 0 ? 1 : 0);
+        var y = 0;
+
+        while (y < Height)
+        {
+            if (!IsEdge(x, y, dx, 0))
+            {
+                y++;
+                continue;
+            }
+
+            var start = y;
+            while (y < Height && IsEdge(x, y, dx, 0))
+                y++;
+
+            segments.Add((line, start, line, y));
+        }
+    }
+
+    /// <summary>True when the pixel is kept and its neighbour in that direction is not, i.e. the edge is here.</summary>
+    private bool IsEdge(int x, int y, int dx, int dy) =>
+        At(x, y) && !At(x + dx, y + dy);
 
     /// <summary>
     /// The mask as an overlay image: the given colour where the object is kept, fully transparent elsewhere.
@@ -65,6 +141,40 @@ public sealed class SelectionMask
     }
 
     public bool IsEverything => KeptCount == _keep.Length;
+
+    /// <summary>
+    /// Rounds the staircase left when the photo's mask is sampled onto the model grid, by filling the concave
+    /// corners of its outline: a gap with five or more kept neighbours becomes part of the object. Kept pixels
+    /// are never removed, so thin detail the user selected is not eaten away.
+    /// </summary>
+    public SelectionMask Smoothed()
+    {
+        var smoothed = new bool[_keep.Length];
+
+        for (var y = 0; y < Height; y++)
+        {
+            for (var x = 0; x < Width; x++)
+            {
+                var index = y * Width + x;
+                if (_keep[index])
+                {
+                    smoothed[index] = true;
+                    continue;
+                }
+
+                var neighbours = 0;
+
+                for (var dy = -1; dy <= 1; dy++)
+                    for (var dx = -1; dx <= 1; dx++)
+                        if ((dx != 0 || dy != 0) && At(x + dx, y + dy))
+                            neighbours++;
+
+                smoothed[index] = neighbours >= 5;
+            }
+        }
+
+        return new SelectionMask(Width, Height, smoothed);
+    }
 
     /// <summary>Nearest-neighbour resample, so the outline stays a clean edge on any model grid.</summary>
     public SelectionMask ResampleTo(int width, int height)

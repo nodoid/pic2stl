@@ -26,6 +26,13 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- MauiUIApplicationDelegate implements application:performFetchWithCompletionHandler:, so the fetch
+	     background mode has to be declared; without it UIKit warns on every launch. The app does no work in
+	     the background itself. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

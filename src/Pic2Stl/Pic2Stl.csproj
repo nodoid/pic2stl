@@ -74,9 +74,7 @@
 		<LinkerArgument Include="-lsqlite3" />
 	</ItemGroup>
 
-	<Target Name="CompileOnnxCustomOpsStub"
-	        BeforeTargets="_ComputeLinkNativeExecutableInputs"
-	        Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
+	<Target Name="CompileOnnxCustomOpsStub" BeforeTargets="_ComputeLinkNativeExecutableInputs" Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
 		<PropertyGroup>
 			<_OnnxStubSource>$(MSBuildProjectDirectory)/Platforms/iOS/OnnxCustomOpsStub.c</_OnnxStubSource>
 			<_OnnxStubObject>$(IntermediateOutputPath)OnnxCustomOpsStub.o</_OnnxStubObject>
@@ -87,8 +85,7 @@
 			<_OnnxStubSdk Condition="'$(_OnnxStubSdk)' == ''">iphoneos</_OnnxStubSdk>
 			<_OnnxStubTarget Condition="'$(_OnnxStubTarget)' == ''">arm64-apple-ios18.0</_OnnxStubTarget>
 		</PropertyGroup>
-		<Exec Command="xcrun --sdk $(_OnnxStubSdk) clang -target $(_OnnxStubTarget) -c &quot;$(_OnnxStubSource)&quot; -o &quot;$(_OnnxStubObject)&quot;"
-		      Condition="!Exists('$(_OnnxStubObject)')" />
+		<Exec Command="xcrun --sdk $(_OnnxStubSdk) clang -target $(_OnnxStubTarget) -c &quot;$(_OnnxStubSource)&quot; -o &quot;$(_OnnxStubObject)&quot;" Condition="!Exists('$(_OnnxStubObject)')" />
 		<ItemGroup>
 			<LinkerArgument Include="$(_OnnxStubObject)" />
 		</ItemGroup>

@@ -1,4 +1,5 @@
 using Microsoft.Maui.Graphics.Platform;
+using Pic2Stl.Core.Imaging;
 
 namespace Pic2Stl.Controls;
 
@@ -10,10 +11,11 @@ public enum PhotoEditMode
 }
 
 /// <summary>
-/// Sits over the full-size photo and lets the user drag out a rectangle on it. The selection is kept as
-/// fractions of the photo, so the same box maps onto any screen size, and everything outside it is dimmed so
-/// the chosen area is obvious. In object mode it can also show the outline the colour match found, so the
-/// user sees what will actually be kept before they commit.
+/// Sits over the full-size photo and lets the user drag out a rectangle on it as a starting point. The
+/// selection is kept as fractions of the photo, so the same box maps onto any screen size, and everything
+/// outside it is dimmed so the chosen area is obvious. In object mode the drawn box gives way to the
+/// object's own outline as soon as the background match finds one, so the user sees the shape that will be
+/// kept rather than the rectangle it was found in.
 /// </summary>
 public sealed class SelectionOverlay : GraphicsView, IDrawable
 {
@@ -24,8 +26,14 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
     private PointF? _dragStart;
     private bool _dragging;
 
-    private Microsoft.Maui.Graphics.IImage? _outline;
-    private RectF _outlineBounds;
+    private Microsoft.Maui.Graphics.IImage? _tint;
+    private RectF _tintBounds;
+    private float[]? _edges;
+
+    private SelectionMask? _mask;
+    private bool _refining;
+    private bool _refineKeep;
+    private PointF? _refineLast;
 
     public SelectionOverlay()
     {
@@ -49,6 +57,8 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
         {
             _dragStart = null;
             _dragging = false;
+            _refining = false;
+            _refineLast = null;
         };
     }
 
@@ -61,12 +71,29 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
     /// <summary>The current box as fractions of the photo: x, y, width and height each between 0 and 1.</summary>
     public RectF? Selection => _selection;
 
-    public bool HasSelection => _selection is { Width: > 0.01f, Height: > 0.01f };
+    /// <summary>
+    /// True when there is something to apply: a drawn box, or a found outline. An object selected with a single
+    /// tap can be smaller than one percent of the photo across, so its outline also counts as a selection.
+    /// </summary>
+    public bool HasSelection =>
+        _selection is { Width: > 0.01f, Height: > 0.01f } || _edges is { Length: > 0 };
 
     /// <summary>Where the photo itself is drawn inside the overlay, in overlay coordinates.</summary>
     public RectF PictureBounds => PictureRect(ViewBounds());
 
     public event EventHandler? SelectionChanged;
+
+    /// <summary>Raised while an outline is being dragged, with the brush stroke the edit means.</summary>
+    public event EventHandler<SelectionStroke>? StrokeAdded;
+
+    /// <summary>Raised when an outline drag finishes, so the preview can be drawn in full again.</summary>
+    public event EventHandler? RefineEnded;
+
+    /// <summary>
+    /// Raised when the user taps without dragging, with the point as a fraction of the photo, so the app can
+    /// work out the bounds of whatever was tapped instead of asking for a box to be drawn first.
+    /// </summary>
+    public event EventHandler<PointF>? Tapped;
 
     public void Start(int imageWidth, int imageHeight)
     {
@@ -75,7 +102,7 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
         _selection = null;
         _dragStart = null;
         _dragging = false;
-        SetOutline(null, default);
+        SetOutline(null, default, null);
         SelectionChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -84,22 +111,40 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
         _selection = null;
         _dragStart = null;
         _dragging = false;
-        SetOutline(null, default);
+        _refining = false;
+        _refineLast = null;
+        SetOutline(null, default, null);
         Invalidate();
         SelectionChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>
-    /// The outline the colour match found, as a PNG to draw over the photo plus the photo fractions it covers.
-    /// Passing null removes it, which is what crop mode and a tap want.
+    /// Records the selection the app worked out from a tap, so the overlay knows there is something to apply
+    /// and the page can enable its button. Unlike a drag this raises no events, because the page is the one
+    /// supplying the box and a change notification would send it straight back to recompute.
     /// </summary>
-    public void SetOutline(byte[]? png, RectF bounds)
+    public void SetBox(RectF box)
     {
-        _outline?.Dispose();
-        _outline = null;
-        _outlineBounds = bounds;
+        _selection = box;
+        _dragStart = null;
+        _dragging = false;
+        Invalidate();
+    }
 
-        if (png is null || png.Length == 0)
+    /// <summary>
+    /// The object the colour match found: a tint to show the kept pixels, the photo fractions it covers, and
+    /// its outline as line segments in photo fractions (x0, y0, x1, y1, ...). Passing nulls removes them,
+    /// which is what crop mode and a tap want.
+    /// </summary>
+    public void SetOutline(byte[]? tintPng, RectF tintBounds, float[]? edges, SelectionMask? mask = null)
+    {
+        _tint?.Dispose();
+        _tint = null;
+        _tintBounds = tintBounds;
+        _edges = edges;
+        _mask = mask;
+
+        if (tintPng is null || tintPng.Length == 0)
         {
             Invalidate();
             return;
@@ -107,20 +152,27 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
 
         try
         {
-            _outline = PlatformImage.FromStream(new MemoryStream(png));
+            _tint = PlatformImage.FromStream(new MemoryStream(tintPng));
         }
         catch (Exception ex)
         {
-            // A decorative preview is not worth breaking the editor over; the box alone still works.
+            // A decorative preview is not worth breaking the editor over; the outline still works.
             System.Diagnostics.Debug.WriteLine($"Outline preview could not be decoded: {ex.Message}");
         }
 
         Invalidate();
     }
 
-    /// <summary>Starts a drag at a point in the overlay's own coordinates.</summary>
+    /// <summary>
+    /// Starts a drag at a point in the overlay's own coordinates. In object mode, grabbing the outline of the
+    /// object that was found refines that outline instead of starting a new box.
+    /// </summary>
     public void BeginBox(PointF point)
     {
+        if (Mode == PhotoEditMode.Object && TryBeginRefine(point))
+            return;
+
+        _refining = false;
         _dragStart = ToFraction(point);
         _dragging = false;
     }
@@ -128,6 +180,15 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
     /// <summary>Extends the drag; a few pixels of movement is treated as a tap, not a box.</summary>
     public void GrowBox(PointF point)
     {
+        if (_refining)
+        {
+            var pulled = ToFraction(point);
+            if (_refineLast is { } last)
+                EmitSegment(last, pulled);
+            _refineLast = pulled;
+            return;
+        }
+
         if (_dragStart is not { } start)
             return;
 
@@ -146,7 +207,7 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
         }
 
         _selection = Normalise(start, current);
-        SetOutline(null, default);
+        SetOutline(null, default, null);
         Invalidate();
         SelectionChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -154,11 +215,26 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
     /// <summary>Finishes the drag, or clears the box if the gesture was only a tap.</summary>
     public void EndBox()
     {
+        if (_refining)
+        {
+            _refining = false;
+            _refineLast = null;
+            RefineEnded?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
         if (!_dragging)
         {
-            // A tap clears the box so the user can start drawing again.
-            Clear();
+            var start = _dragStart;
             _dragStart = null;
+
+            // A tap in object mode means "this thing here", so the page works out the bounds instead of the user
+            // drawing them. In crop mode there is nothing to infer, so a tap clears the box for a fresh drag.
+            if (Mode == PhotoEditMode.Object && start is { } point)
+                Tapped?.Invoke(this, point);
+            else
+                Clear();
+
             return;
         }
 
@@ -170,6 +246,44 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
     {
         var picture = PictureRect(dirtyRect);
         var dim = Color.FromRgba(0f, 0f, 0f, 0.55f);
+        var accent = Mode == PhotoEditMode.Object ? ObjectColour : CropColour;
+        canvas.Antialias = true;
+
+        // Once the object has been found its own edge is the selection, so the box it was found in goes away
+        // and the photo is dimmed all over with the object lit by its outline.
+        if (Mode == PhotoEditMode.Object && (_edges is { Length: > 0 } || _tint is not null))
+        {
+            canvas.FillColor = Color.FromRgba(0f, 0f, 0f, 0.35f);
+            canvas.FillRectangle(picture);
+
+            if (_tint is not null)
+                canvas.DrawImage(
+                    _tint,
+                    picture.Left + _tintBounds.X * picture.Width,
+                    picture.Top + _tintBounds.Y * picture.Height,
+                    _tintBounds.Width * picture.Width,
+                    _tintBounds.Height * picture.Height);
+
+            if (_edges is { Length: > 0 })
+            {
+                var outline = new PathF();
+                for (var i = 0; i + 3 < _edges.Length; i += 4)
+                {
+                    outline.MoveTo(
+                        picture.Left + _edges[i] * picture.Width,
+                        picture.Top + _edges[i + 1] * picture.Height);
+                    outline.LineTo(
+                        picture.Left + _edges[i + 2] * picture.Width,
+                        picture.Top + _edges[i + 3] * picture.Height);
+                }
+
+                canvas.StrokeColor = accent;
+                canvas.StrokeSize = 2.5f;
+                canvas.DrawPath(outline);
+            }
+
+            return;
+        }
 
         if (!HasSelection)
         {
@@ -191,29 +305,87 @@ public sealed class SelectionOverlay : GraphicsView, IDrawable
         canvas.FillRectangle(picture.Left, top, left - picture.Left, height);
         canvas.FillRectangle(left + width, top, picture.Right - (left + width), height);
 
-        // The found object glows inside the box, so a weak colour match is visible before it is applied.
-        if (_outline is not null)
-        {
-            var outlineLeft = picture.Left + _outlineBounds.X * picture.Width;
-            var outlineTop = picture.Top + _outlineBounds.Y * picture.Height;
-            canvas.DrawImage(
-                _outline,
-                outlineLeft,
-                outlineTop,
-                _outlineBounds.Width * picture.Width,
-                _outlineBounds.Height * picture.Height);
-        }
-
-        var accent = Mode == PhotoEditMode.Object ? ObjectColour : CropColour;
         canvas.StrokeColor = accent;
         canvas.StrokeSize = 2.5f;
-        canvas.Antialias = true;
         canvas.DrawRectangle(left, top, width, height);
 
         const float handle = 7f;
         canvas.FillColor = accent;
         foreach (var (hx, hy) in new[] { (left, top), (left + width, top), (left, top + height), (left + width, top + height) })
             canvas.FillRoundedRectangle(hx - handle / 2, hy - handle / 2, handle, handle, 2f);
+    }
+
+    /// <summary>
+    /// Starts nudging the found object's outline if the touch landed on its edge. Touching the kept side trims
+    /// the object back; touching just outside pushes the outline outwards. Returns false for a touch anywhere
+    /// else, which starts a new box instead.
+    /// </summary>
+    private bool TryBeginRefine(PointF point)
+    {
+        var mask = _mask;
+        if (mask is null || _tintBounds.Width <= 0f || _tintBounds.Height <= 0f)
+            return false;
+
+        var fraction = ToFraction(point);
+        var x = (fraction.X - _tintBounds.X) / _tintBounds.Width * mask.Width;
+        var y = (fraction.Y - _tintBounds.Y) / _tintBounds.Height * mask.Height;
+
+        var grab = Math.Max(3f, Math.Min(mask.Width, mask.Height) / 22f);
+        if (!NearEdge(mask, x, y, grab))
+            return false;
+
+        _refining = true;
+        _refineKeep = !mask.At((int)MathF.Floor(x), (int)MathF.Floor(y));
+        _refineLast = fraction;
+        EmitStroke(fraction);
+        return true;
+    }
+
+    /// <summary>True when the sample square around a point holds both kept and unkept pixels, i.e. it is an edge.</summary>
+    private static bool NearEdge(SelectionMask mask, float x, float y, float grab)
+    {
+        var fromX = (int)MathF.Floor(x - grab);
+        var toX = (int)MathF.Ceiling(x + grab);
+        var fromY = (int)MathF.Floor(y - grab);
+        var toY = (int)MathF.Ceiling(y + grab);
+
+        var kept = 0;
+        var total = 0;
+
+        for (var py = fromY; py <= toY; py++)
+            for (var px = fromX; px <= toX; px++)
+            {
+                total++;
+
+                // Pixels outside the mask count as background, so the outline's outer side is grabbable too.
+                if (mask.At(px, py))
+                    kept++;
+            }
+
+        return kept > 0 && kept < total;
+    }
+
+    /// <summary>How wide the brush is, as a fraction of the photo's width at the current zoom-independent size.</summary>
+    private float BrushRadius() =>
+        ImageWidth < 1 ? 0.03f : 0.03f * Math.Max(ImageWidth, ImageHeight) / ImageWidth;
+
+    private void EmitStroke(PointF fraction) =>
+        StrokeAdded?.Invoke(this, new SelectionStroke(fraction.X, fraction.Y, BrushRadius(), _refineKeep));
+
+    /// <summary>Emits strokes along a drag, close enough together that the brush leaves a continuous mark.</summary>
+    private void EmitSegment(PointF from, PointF to)
+    {
+        var dx = (to.X - from.X) * ImageWidth;
+        var dy = (to.Y - from.Y) * ImageHeight;
+        var distance = MathF.Sqrt(dx * dx + dy * dy);
+        var spacing = MathF.Max(1f, BrushRadius() * ImageWidth * 0.5f);
+        var steps = Math.Max(1, (int)MathF.Ceiling(distance / spacing));
+
+        for (var step = 1; step <= steps; step++)
+        {
+            var t = step / (float)steps;
+            EmitStroke(new PointF(from.X + (to.X - from.X) * t, from.Y + (to.Y - from.Y) * t));
+        }
     }
 
     private RectF ViewBounds() => new(0, 0, (float)Math.Max(Width, 0), (float)Math.Max(Height, 0));

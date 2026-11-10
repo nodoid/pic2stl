@@ -132,3 +132,41 @@ public class PaletteBuilderTests
         return new ImageData(width, height, pixels);
     }
 }
+
+[TestFixture]
+public class ColourPalettesTests
+{
+    [Test]
+    public void Presets_AreFourByFourDistinctColours()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(ColourPalettes.Presets, Has.Count.EqualTo(16));
+            Assert.That(ColourPalettes.Presets.Distinct().Count(), Is.EqualTo(16));
+        });
+    }
+
+    [Test]
+    public void Shades_AreTwoHundredAndFiftySixDistinctColours()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(ColourPalettes.Shades, Has.Count.EqualTo(256));
+            Assert.That(ColourPalettes.Shades, Has.Count.EqualTo(ColourPalettes.ShadeColumns * ColourPalettes.ShadeRows));
+            Assert.That(ColourPalettes.Shades.Distinct().Count(), Is.EqualTo(256));
+        });
+    }
+
+    [Test]
+    public void Shades_RunFromNearlyBlackToPastelTints()
+    {
+        var darkest = ColourPalettes.Shades.Min(colour => colour.R + colour.G + colour.B);
+        var lightest = ColourPalettes.Shades.Max(colour => colour.R + colour.G + colour.B);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(darkest, Is.LessThan(120));
+            Assert.That(lightest, Is.GreaterThan(660));
+        });
+    }
+}

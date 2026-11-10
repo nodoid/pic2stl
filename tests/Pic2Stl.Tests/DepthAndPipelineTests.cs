@@ -1,5 +1,6 @@
 using Pic2Stl.Core.Colours;
 using Pic2Stl.Core.Depth;
+using Pic2Stl.Core.Geometry;
 using Pic2Stl.Core.Imaging;
 using Pic2Stl.Core.Pipeline;
 
@@ -227,6 +228,25 @@ public class MeshGenerationPipelineTests
     }
 
     [Test]
+    public async Task GenerateAsync_MapsThePhotoOntoTheUsersPalette()
+    {
+        Rgb[] filaments = [new(200, 40, 40), new(40, 40, 200)];
+        var pipeline = new MeshGenerationPipeline(new FixedDepthEstimator());
+        var result = await pipeline.GenerateAsync(
+            TestImages.FourQuadrants(),
+            new GenerationOptions { Palette = filaments, ExportDetail = 32, PreviewDetail = 12 });
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Palette.Colours, Is.EqualTo(filaments));
+            Assert.That(
+                result.Mesh.TrianglesPerMaterial().Keys,
+                Is.SubsetOf(new byte[] { 0, 1 }),
+                "Every triangle must use one of the colours the user defined.");
+        });
+    }
+
+    [Test]
     public async Task GenerateAsync_WidthOptionSetsModelSize()
     {
         var pipeline = new MeshGenerationPipeline(new FixedDepthEstimator());
@@ -239,6 +259,39 @@ public class MeshGenerationPipelineTests
     }
 
     [Test]
+    public async Task GenerateAsync_WithOutlineBuildsTheObjectNotThePhoto()
+    {
+        const int size = 40;
+        var keep = new bool[size * size];
+        for (var y = 12; y < 28; y++)
+            for (var x = 4; x < 36; x++)
+                keep[y * size + x] = true;
+
+        var pipeline = new MeshGenerationPipeline(new FixedDepthEstimator());
+        var result = await pipeline.GenerateAsync(
+            TestImages.FourQuadrants(size, size),
+            new GenerationOptions
+            {
+                WidthMm = 80,
+                ExportDetail = size,
+                PreviewDetail = 12,
+                Keep = new SelectionMask(size, size, keep),
+            });
+
+        var (min, max) = result.Mesh.Bounds();
+
+        Assert.Multiple(() =>
+        {
+            // The photo is square, so the old plate was 80x80 mm. The object is 32x16 pixels: 80x40 mm trimmed.
+            Assert.That(max.X - min.X, Is.EqualTo(80).Within(0.5));
+            Assert.That(max.Y - min.Y, Is.EqualTo(40).Within(1));
+        });
+
+        TestImages.AssertWatertight(result.Mesh);
+        TestImages.AssertOutwardFacing(result.Mesh);
+    }
+
+    [Test]
     public void Validate_RejectsOutOfRangeSettings()
     {
         Assert.Multiple(() =>
@@ -247,6 +300,8 @@ public class MeshGenerationPipelineTests
             Assert.That(() => new GenerationOptions { WidthMm = 500 }.Validate(), Throws.TypeOf<ArgumentOutOfRangeException>());
             Assert.That(() => new GenerationOptions { ExportDetail = 4 }.Validate(), Throws.TypeOf<ArgumentOutOfRangeException>());
             Assert.That(() => new GenerationOptions { PreviewDetail = 2 }.Validate(), Throws.TypeOf<ArgumentOutOfRangeException>());
+            Assert.That(() => new GenerationOptions { Palette = Array.Empty<Rgb>() }.Validate(), Throws.TypeOf<ArgumentOutOfRangeException>());
+            Assert.That(() => new GenerationOptions { Palette = new Rgb[17] }.Validate(), Throws.TypeOf<ArgumentOutOfRangeException>());
         });
     }
 

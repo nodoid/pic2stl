@@ -1,5 +1,7 @@
 using Pic2Stl.Core.Colours;
 using Pic2Stl.Core.Depth;
+using Pic2Stl.Core.Geometry;
+using Pic2Stl.Core.Imaging;
 using Pic2Stl.Core.Meshing;
 
 namespace Pic2Stl.Tests;
@@ -88,6 +90,94 @@ public class SolidMesherTests
 
         Assert.That(used, Is.Not.Empty);
         Assert.That(used.All(m => m < quantised.Palette.Count), "Material index outside the palette.");
+    }
+
+    [Test]
+    public void Build_WithOutlinePrintsTheObjectInsteadOfThePlate()
+    {
+        const int width = 30, height = 20;
+        var depth = DepthMap.Constant(width, height, 0.5f);
+
+        // A horizontal band: 30x4 pixels of subject in a 30x20 photo. The trimmed model is therefore 80x10.7 mm,
+        // where the untrimmed plate would have been 80x53.3 mm.
+        var keep = new bool[width * height];
+        for (var y = 8; y < 12; y++)
+            for (var x = 0; x < width; x++)
+                keep[y * width + x] = true;
+
+        var mesh = SolidMesher.Build(depth, null, Options, new SelectionMask(width, height, keep));
+        var (min, max) = mesh.Bounds();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(max.X - min.X, Is.EqualTo(Options.WidthMm).Within(1e-3));
+            Assert.That(max.Y - min.Y, Is.EqualTo(Options.WidthMm * 4 / 30).Within(1e-3));
+        });
+
+        TestImages.AssertWatertight(mesh);
+        TestImages.AssertOutwardFacing(mesh);
+    }
+
+    [Test]
+    public void Build_WithOutlineClosesTheObjectWithATaperedEdge()
+    {
+        const int width = 40, height = 30;
+        var depth = DepthMap.Constant(width, height, 0.5f);
+        var keep = new bool[width * height];
+
+        for (var y = 5; y < 25; y++)
+            for (var x = 5; x < 35; x++)
+                keep[y * width + x] = true;
+
+        var full = SolidMesher.Build(depth, null, Options);
+        var trimmed = SolidMesher.Build(depth, null, Options, new SelectionMask(width, height, keep));
+
+        var fullFront = full.Vertices.Where(v => v.Z > 0).Min(v => v.Z);
+        var trimmedFront = trimmed.Vertices.Where(v => v.Z > 0).Min(v => v.Z);
+
+        Assert.Multiple(() =>
+        {
+            // The untrimmed plate keeps the full relief right up to its rectangle; the object fades to the base
+            // at its own outline, so the height the photo cannot show is not printed as a vertical wall.
+            Assert.That(fullFront, Is.EqualTo(Options.MinThicknessMm + 0.5f * Options.ReliefMm).Within(1e-4));
+            Assert.That(trimmedFront, Is.EqualTo(Options.MinThicknessMm).Within(1e-4));
+            Assert.That(trimmed.SignedVolume(), Is.LessThan(full.SignedVolume()));
+        });
+
+        TestImages.AssertWatertight(trimmed);
+        TestImages.AssertOutwardFacing(trimmed);
+    }
+
+    [Test]
+    public void Build_WithIrregularOutlineStaysWatertight()
+    {
+        const int width = 36, height = 36;
+        var keep = new bool[width * height];
+
+        for (var y = 0; y < height; y++)
+            for (var x = 0; x < width; x++)
+                keep[y * width + x] = (x - 18) * (x - 18) + (y - 18) * (y - 18) <= 12 * 12;
+
+        // A hole inside the object must become a wall too, not an open surface.
+        for (var y = 15; y < 21; y++)
+            for (var x = 15; x < 21; x++)
+                keep[y * width + x] = false;
+
+        var mesh = SolidMesher.Build(DepthMap.Constant(width, height, 0.7f), null, Options,
+            new SelectionMask(width, height, keep));
+
+        TestImages.AssertWatertight(mesh);
+        TestImages.AssertOutwardFacing(mesh);
+    }
+
+    [Test]
+    public void Build_RejectsMismatchedOutlineSize()
+    {
+        var depth = DepthMap.Constant(8, 8);
+
+        Assert.That(
+            () => SolidMesher.Build(depth, null, Options, SelectionMask.All(4, 4)),
+            Throws.ArgumentException);
     }
 
     [Test]

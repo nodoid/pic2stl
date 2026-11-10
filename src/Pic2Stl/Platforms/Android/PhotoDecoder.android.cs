@@ -23,6 +23,7 @@ public sealed partial class PhotoDecoder
                     ExifInterface.TagOrientation,
                     (int)Orientation.Normal);
 
+                // EXIF orientation is a rotation plus, for the mirrored variants, a flip applied after it.
                 (rotation, mirror) = orientation switch
                 {
                     Orientation.Rotate90 => (90, false),
@@ -30,6 +31,8 @@ public sealed partial class PhotoDecoder
                     Orientation.Rotate270 => (270, false),
                     Orientation.FlipHorizontal => (0, true),
                     Orientation.FlipVertical => (180, true),
+                    Orientation.Transpose => (90, true),
+                    Orientation.Transverse => (270, true),
                     _ => (0, false),
                 };
             }

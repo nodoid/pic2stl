@@ -12,6 +12,12 @@ public sealed class GenerationOptions
     /// <summary>Print colours: 4 by default, 16 when the tombstone-style palette is enabled.</summary>
     public int ColourCount { get; init; } = 4;
 
+    /// <summary>
+    /// The filament colours the photo is mapped onto, as the user defined them. When omitted, the palette is
+    /// found automatically with median cut, so a photo with no palette set still prints with its own colours.
+    /// </summary>
+    public IReadOnlyList<Rgb>? Palette { get; init; }
+
     /// <summary>Width of the finished model in millimetres.</summary>
     public float WidthMm { get; init; } = 80f;
 
@@ -25,8 +31,8 @@ public sealed class GenerationOptions
     public int PreviewDetail { get; init; } = 72;
 
     /// <summary>
-    /// Optional object outline, sized to match the source photo. Everything outside it is flattened to the base,
-    /// so a photo with a selected object prints as that object on a plain plinth rather than the whole scene.
+    /// Optional object outline, sized to match the source photo. The solid is built inside it only, so a photo
+    /// with a selected object prints as that object rather than as a plate carrying the whole scene.
     /// </summary>
     public SelectionMask? Keep { get; init; }
 
@@ -38,6 +44,9 @@ public sealed class GenerationOptions
     {
         if (ColourCount is < 1 or > 16)
             throw new ArgumentOutOfRangeException(nameof(ColourCount), "Colour count must be between 1 and 16.");
+
+        if (Palette is { } palette && palette.Count is < 1 or > 16)
+            throw new ArgumentOutOfRangeException(nameof(Palette), "A print palette must have between 1 and 16 colours.");
 
         if (WidthMm is < 10f or > 300f)
             throw new ArgumentOutOfRangeException(nameof(WidthMm), "Width must be between 10 and 300 mm.");
@@ -132,7 +141,19 @@ public sealed class MeshGenerationPipeline
         }
 
         Report(66, "Choosing print colours");
-        var quantised = PaletteBuilder.Build(exportImage, options.EffectiveColourCount);
+
+        // A palette the user defined wins: the photo is mapped onto their actual filaments instead of onto
+        // colours found in the picture.
+        PaletteResult quantised;
+        if (options.Palette is { Count: > 0 } filaments)
+        {
+            var palette = new Palette(filaments);
+            quantised = new PaletteResult(palette, PaletteBuilder.Map(exportImage, palette));
+        }
+        else
+        {
+            quantised = PaletteBuilder.Build(exportImage, options.EffectiveColourCount);
+        }
 
         cancellationToken.ThrowIfCancellationRequested();
         Report(74, "Building solid model");
@@ -145,7 +166,9 @@ public sealed class MeshGenerationPipeline
             MinThicknessMm = MathF.Max(1.2f, options.WidthMm * 0.025f),
         };
 
-        var mesh = await Task.Run(() => SolidMesher.Build(exportDepth, quantised.Map, meshOptions), cancellationToken)
+        // The outline trims the solid to the object, so the print is the subject rather than the photo's plate.
+        var mesh = await Task.Run(
+                () => SolidMesher.Build(exportDepth, quantised.Map, meshOptions, exportMask), cancellationToken)
             .ConfigureAwait(false);
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -163,15 +186,16 @@ public sealed class MeshGenerationPipeline
         }
 
         var previewMap = PaletteBuilder.Map(previewImage, quantised.Palette);
-        var previewMesh = SolidMesher.Build(previewDepth, previewMap, meshOptions);
+        var previewMesh = SolidMesher.Build(previewDepth, previewMap, meshOptions, previewMask);
 
         var elapsed = _timeProvider.GetElapsedTime(started);
         Report(100, "Done");
 
-        return new GenerationResult(mesh, previewMesh, quantised.Palette, smoothed, _depthEstimator.EngineName, elapsed);
+        return new GenerationResult(
+            mesh, previewMesh, quantised.Palette, smoothed, _depthEstimator.EngineName, elapsed);
     }
 
-    /// <summary>Sets depth outside the object to zero, which makes the base slab flat there.</summary>
+    /// <summary>Sets depth outside the object to zero, so the boundary of the trimmed solid sits at the base.</summary>
     private static DepthMap FlattenOutside(DepthMap depth, SelectionMask keep)
     {
         var values = new float[depth.Width * depth.Height];

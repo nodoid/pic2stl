@@ -8,12 +8,17 @@
              BackgroundColor="#0B0F1A">
 
     <Grid>
-        <Grid RowDefinitions="Auto,Auto,Auto,Auto,*,Auto"
+        <!-- Everything above the 3D view scrolls, so the controls still fit on a small screen while the
+             viewer keeps its own space and its drag gestures are never stolen by a scroll view. -->
+        <Grid RowDefinitions="*,Auto,Auto,Auto"
               RowSpacing="10"
               Padding="16,10,16,14">
 
+          <ScrollView x:Name="MainScroll" Grid.Row="0" VerticalScrollBarVisibility="Never">
+            <VerticalStackLayout Spacing="10">
+
             <!-- Title -->
-            <VerticalStackLayout Grid.Row="0" Spacing="2">
+            <VerticalStackLayout Spacing="2">
                 <Label Text="Pic2Stl"
                        FontSize="28"
                        FontAttributes="Bold"
@@ -24,7 +29,7 @@
             </VerticalStackLayout>
 
             <!-- Photo selection -->
-            <Border Grid.Row="1"
+            <Border
                     BackgroundColor="#161C2C"
                     Stroke="#242C42"
                     StrokeThickness="1"
@@ -62,8 +67,7 @@
             </Border>
 
             <!-- Crop and object selection, only once there is a photo -->
-            <Grid Grid.Row="2"
-                  x:Name="EditBar"
+            <Grid x:Name="EditBar"
                   ColumnDefinitions="*,*,Auto"
                   ColumnSpacing="8"
                   IsVisible="False">
@@ -97,7 +101,7 @@
             </Grid>
 
             <!-- Settings, generate and progress -->
-            <VerticalStackLayout Grid.Row="3" Spacing="8">
+            <VerticalStackLayout Spacing="8">
                 <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
                     <Label Text="Width"
                            TextColor="#8C97B5"
@@ -122,45 +126,75 @@
                            VerticalOptions="Center" />
                 </Grid>
 
-                <Grid ColumnDefinitions="*,Auto">
-                    <VerticalStackLayout Spacing="0">
-                        <Label Text="16 print colours"
+                <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="8">
+                    <VerticalStackLayout Spacing="0" VerticalOptions="Center">
+                        <Label Text="Print colours"
                                TextColor="#DCE4FF"
                                FontSize="14" />
-                        <Label Text="Off uses 4 colours"
+                        <Label Text="Spools the photo is mapped onto."
                                TextColor="#8C97B5"
                                FontSize="11" />
                     </VerticalStackLayout>
-                    <Switch x:Name="ColourSwitch"
+                    <Button x:Name="ColourCountDown"
                             Grid.Column="1"
-                            OnColor="#6C8CFF"
-                            ThumbColor="#EEF2FF"
-                            VerticalOptions="Center" />
+                            Text="−"
+                            Clicked="OnFewerColours"
+                            IsEnabled="False"
+                            BackgroundColor="#1B2234"
+                            TextColor="#DCE4FF"
+                            CornerRadius="10"
+                            WidthRequest="38"
+                            HeightRequest="34"
+                            Padding="0"
+                            FontSize="16" />
+                    <Label x:Name="ColourCountLabel"
+                           Grid.Column="2"
+                           Text="4"
+                           TextColor="#EEF2FF"
+                           FontSize="16"
+                           FontAttributes="Bold"
+                           WidthRequest="24"
+                           HorizontalTextAlignment="Center"
+                           VerticalOptions="Center" />
+                    <Button x:Name="ColourCountUp"
+                            Grid.Column="3"
+                            Text="+"
+                            Clicked="OnMoreColours"
+                            BackgroundColor="#1B2234"
+                            TextColor="#DCE4FF"
+                            CornerRadius="10"
+                            WidthRequest="38"
+                            HeightRequest="34"
+                            Padding="0"
+                            FontSize="16" />
                 </Grid>
 
-                <Button x:Name="GenerateButton"
-                        Text="Generate 3D model"
-                        Clicked="OnGenerateClicked"
-                        IsEnabled="False"
-                        BackgroundColor="#EEF2FF"
-                        TextColor="#0B0F1A"
-                        FontAttributes="Bold"
-                        CornerRadius="12"
-                        HeightRequest="46" />
+                <!-- The palette the model was printed with; edits are written into the 3MF -->
+                <VerticalStackLayout x:Name="PrintColoursRow"
+                                     Spacing="4"
+                                     IsVisible="False">
+                    <Label Text="Print colours"
+                           TextColor="#DCE4FF"
+                           FontSize="14" />
+                    <Label Text="Tap a colour to name it and match your filament."
+                           TextColor="#8C97B5"
+                           FontSize="11" />
+                    <ScrollView Orientation="Horizontal"
+                                HorizontalScrollBarVisibility="Never">
+                        <HorizontalStackLayout x:Name="ColourChips"
+                                               Spacing="10"
+                                               Padding="0,2" />
+                    </ScrollView>
+                </VerticalStackLayout>
 
-                <pv:ClaudeProgressBar x:Name="ProgressBar"
-                                      Progress="0"
-                                      Text="Ready when you are"
-                                      IsPercentageShown="True"
-                                      IsAnimating="False"
-                                      BarThickness="10"
-                                      ProgressColor="#6C8CFF"
-                                      TrackColor="#1B2234"
-                                      ShimmerColor="#B9C8FF" />
             </VerticalStackLayout>
 
+            </VerticalStackLayout>
+          </ScrollView>
+
             <!-- 3D view -->
-            <Border Grid.Row="4"
+            <Border Grid.Row="1"
+                    HeightRequest="280"
                     BackgroundColor="#0E1220"
                     Stroke="#242C42"
                     StrokeThickness="1"
@@ -186,8 +220,44 @@
                 </Grid>
             </Border>
 
+            <!-- Generating stays on screen while the settings above it scroll -->
+            <VerticalStackLayout Grid.Row="2" Spacing="8">
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                    <Button x:Name="ColoursButton"
+                            Text="Colours"
+                            Clicked="OnColoursClicked"
+                            IsEnabled="False"
+                            BackgroundColor="#2A3350"
+                            TextColor="#DCE4FF"
+                            CornerRadius="12"
+                            HeightRequest="46"
+                            FontSize="13" />
+
+                    <Button x:Name="GenerateButton"
+                            Grid.Column="1"
+                            Text="Generate 3D model"
+                            Clicked="OnGenerateClicked"
+                            IsEnabled="False"
+                            BackgroundColor="#EEF2FF"
+                            TextColor="#0B0F1A"
+                            FontAttributes="Bold"
+                            CornerRadius="12"
+                            HeightRequest="46" />
+                </Grid>
+
+                <pv:ClaudeProgressBar x:Name="ProgressBar"
+                                      Progress="0"
+                                      Text="Ready when you are"
+                                      IsPercentageShown="True"
+                                      IsAnimating="False"
+                                      BarThickness="10"
+                                      ProgressColor="#6C8CFF"
+                                      TrackColor="#1B2234"
+                                      ShimmerColor="#B9C8FF" />
+            </VerticalStackLayout>
+
             <!-- Export -->
-            <Grid Grid.Row="5" ColumnDefinitions="*,*" ColumnSpacing="10">
+            <Grid Grid.Row="3" ColumnDefinitions="*,*" ColumnSpacing="10">
                 <Button x:Name="Share3mfButton"
                         Text="Share .3mf"
                         Clicked="OnShareThreeMf"
@@ -264,7 +334,7 @@
                            VerticalOptions="Center" />
                 </Grid>
                 <Label x:Name="EditorObjectStatus"
-                       Text="Tighter means less of the background is swept in."
+                       Text="Higher matches more of the surrounding background, so the edge hugs the object."
                        TextColor="#8C97B5"
                        FontSize="11" />
             </VerticalStackLayout>
@@ -297,5 +367,46 @@
                         HeightRequest="44" />
             </Grid>
         </Grid>
+
+        <!-- The print colours, opened from the Colours button so the picker is reachable without scrolling. -->
+        <Grid x:Name="PaletteLayer"
+              IsVisible="False"
+              ZIndex="9"
+              BackgroundColor="#E60B0F1A"
+              Padding="18">
+            <Border BackgroundColor="#161C2C"
+                    Stroke="#242C42"
+                    StrokeThickness="1"
+                    StrokeShape="RoundRectangle 18"
+                    Padding="18"
+                    VerticalOptions="Center">
+                <VerticalStackLayout Spacing="10">
+                    <Label Text="Print colours"
+                           FontSize="18"
+                           FontAttributes="Bold"
+                           TextColor="#EEF2FF" />
+                    <Label Text="Tap a colour to match your filament and name it."
+                           FontSize="12"
+                           TextColor="#8C97B5" />
+
+                    <ScrollView VerticalScrollBarVisibility="Never"
+                                MaximumHeightRequest="360">
+                        <VerticalStackLayout x:Name="PaletteRows" Spacing="8" />
+                    </ScrollView>
+
+                    <Button Text="Done"
+                            Clicked="OnPaletteDone"
+                            BackgroundColor="#EEF2FF"
+                            TextColor="#0B0F1A"
+                            FontAttributes="Bold"
+                            CornerRadius="12"
+                            HeightRequest="44" />
+                </VerticalStackLayout>
+            </Border>
+        </Grid>
+
+        <!-- Modal layer for the colour picker; kept empty until a picker is opened. -->
+        <Grid x:Name="ModalLayer" IsVisible="False" ZIndex="10" />
+
     </Grid>
 </ContentPage>

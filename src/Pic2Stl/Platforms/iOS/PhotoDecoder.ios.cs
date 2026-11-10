@@ -45,9 +45,9 @@ public sealed partial class PhotoDecoder
 
             context.InterpolationQuality = CGInterpolationQuality.High;
 
-            // Bitmap contexts start at the bottom left, so flip the drawing to keep the photo the right way up.
-            context.TranslateCTM(0, height);
-            context.ScaleCTM(1, -1);
+            // A bitmap context's memory is top row first, so drawing the image straight in keeps it the right
+            // way up. Flipping the CTM here (as you must when drawing into a UIKit view's context) would turn
+            // every photo upside down.
             context.DrawImage(new CGRect(0, 0, width, height), upright.CGImage);
 
             using var flattened = context.ToImage()

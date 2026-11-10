@@ -50,6 +50,13 @@ public sealed class MeshViewer : GraphicsView, IDrawable
         ResetView();
     }
 
+    /// <summary>Recolours the same model without moving the view, used while the user edits the print colours.</summary>
+    public void UpdatePalette(IReadOnlyList<Rgb> palette)
+    {
+        _palette = palette;
+        Invalidate();
+    }
+
     public void Clear()
     {
         _mesh = null;

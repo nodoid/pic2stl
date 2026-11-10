@@ -2,6 +2,7 @@
 using Pic2Stl.Core.Colours;
 using Pic2Stl.Core.Depth;
 using Pic2Stl.Core.Export;
+using Pic2Stl.Core.Geometry;
 using Pic2Stl.Core.Imaging;
 using Pic2Stl.Core.Pipeline;
 using Pic2Stl.Services;
@@ -56,6 +57,27 @@ internal static class SelfTest
                 throw new InvalidOperationException($"Decoded photo came back {decoded.Image.Width}px wide.");
             if (decoded.PreviewPng[24] != 8)
                 throw new InvalidOperationException($"Photo was encoded at {decoded.PreviewPng[24]} bits per channel.");
+
+            // Row 0 has to stay the top of the picture: the mesher puts it at the top of the model, so a decode
+            // that flips or mirrors the pixels prints the photo the wrong way round. Three marked corners catch
+            // both a vertical flip and a horizontal mirror.
+            var marked = new ImageData(4, 3, MarkedCorners());
+            var loadedMarked = await Task.Run(() => photoDecoder.LoadAsync(new MemoryStream(PngEncoder.Encode(marked))));
+            var markedImage = loadedMarked.Image;
+            var topLeft = markedImage.GetColor(0, 0);
+            var topRight = markedImage.GetColor(markedImage.Width - 1, 0);
+            var bottomLeft = markedImage.GetColor(0, markedImage.Height - 1);
+
+            if (!IsRed(topLeft) || !IsGreen(topRight) || !IsBlue(bottomLeft))
+                throw new InvalidOperationException(
+                    $"Photo corners came out {Corners(markedImage)}; the camera path flipped or mirrored the photo.");
+
+            Log($"photo corners {Corners(markedImage)}");
+
+            // Dominant-channel checks rather than exact values, because a wide-colour device converts to sRGB.
+            static bool IsRed(Rgb colour) => colour.R > 200 && colour.G < 60 && colour.B < 60;
+            static bool IsGreen(Rgb colour) => colour.G > 200 && colour.R < 60 && colour.B < 60;
+            static bool IsBlue(Rgb colour) => colour.B > 200 && colour.R < 60 && colour.G < 60;
 #endif
 
             // Interlaced PNGs arrive as seven sub-images; check the pixels land where they belong.
@@ -79,6 +101,14 @@ internal static class SelfTest
             var selection = ObjectSelector.Select(subject, new SelectionRect(5, 5, 190, 140));
             Log($"crop {cropped.Width}x{cropped.Height} png={encoded.Length} " +
                 $"object={selection.Bounds} kept={selection.Mask.KeptCount}");
+
+            // The edge brush cuts a disc out of the found object, exactly as a drag on its outline does.
+            var trimmed = ObjectSelector.Refine(
+                selection, subject.Width, subject.Height, [new SelectionStroke(0.5f, 0.5f, 0.02f, false)]);
+            Log($"refine kept={selection.Mask.KeptCount}->{trimmed.Mask.KeptCount}");
+
+            if (trimmed.Mask.KeptCount >= selection.Mask.KeptCount)
+                throw new InvalidOperationException("Refining the object did not cut anything away.");
 
             if (roundTripped.Width != cropped.Width || roundTripped.Height != cropped.Height)
                 throw new InvalidOperationException(
@@ -113,18 +143,32 @@ internal static class SelfTest
             Log($"stl={new FileInfo(stlPath).Length} 3mf={new FileInfo(threeMfPath).Length}");
 
             var objectPhoto = subject.Crop(selection.Bounds);
+            // Two filament colours the user defined, so the run also proves the photo is mapped onto them.
+            Rgb[] filaments = [new(220, 60, 40), new(40, 70, 130)];
             var maskedOptions = new GenerationOptions
             {
                 ColourCount = 4,
+                Palette = filaments,
                 ExportDetail = 64,
                 PreviewDetail = 20,
                 Keep = selection.Mask,
             };
             var masked = await heuristic.GenerateAsync(objectPhoto, maskedOptions);
-            Log($"masked tris={masked.TriangleCount} volume={masked.Mesh.SignedVolume():0.0}");
+            var (maskedMin, maskedMax) = masked.Mesh.Bounds();
+            Log($"masked tris={masked.TriangleCount} palette={masked.Palette.Count} " +
+                $"volume={masked.Mesh.SignedVolume():0.0} size={maskedMax.X - maskedMin.X:0}x{maskedMax.Y - maskedMin.Y:0}mm");
+
+            if (masked.Palette.Count != filaments.Length)
+                throw new InvalidOperationException("The masked model did not use the print colours it was given.");
 
             if (masked.Mesh.SignedVolume() <= 0)
                 throw new InvalidOperationException("Masked mesh has non-positive volume.");
+
+            // The object is trimmed out of the photo's plate, so its rim walls must still close the surface.
+            if (!IsWatertight(masked.Mesh))
+                throw new InvalidOperationException("Trimmed mesh has open edges.");
+
+            Log("masked watertight");
 
             Log("ensuring ai model");
             var modelPath = await installer.EnsureModelAsync(
@@ -154,6 +198,52 @@ internal static class SelfTest
             Log(ex.StackTrace ?? string.Empty);
         }
     }
+
+    /// <summary>Every edge must be used once in each direction, which is what makes a rim wall close the solid.</summary>
+    private static bool IsWatertight(Mesh mesh)
+    {
+        var edges = new HashSet<(int, int)>();
+
+        foreach (var triangle in mesh.Triangles)
+            foreach (var edge in new[] { (triangle.A, triangle.B), (triangle.B, triangle.C), (triangle.C, triangle.A) })
+                if (!edges.Add(edge))
+                    return false;
+
+        return edges.All(edge => edges.Contains((edge.Item2, edge.Item1)));
+    }
+
+    /// <summary>White with a red top-left, green top-right and blue bottom-left, so a flip or mirror shows up.</summary>
+    private static byte[] MarkedCorners()
+    {
+        const int width = 4, height = 3;
+        var pixels = new byte[width * height * 4];
+        for (var i = 0; i < width * height; i++)
+        {
+            pixels[i * 4] = 255;
+            pixels[i * 4 + 1] = 255;
+            pixels[i * 4 + 2] = 255;
+            pixels[i * 4 + 3] = 255;
+        }
+
+        void Paint(int x, int y, byte r, byte g, byte b)
+        {
+            var i = (y * width + x) * 4;
+            pixels[i] = r;
+            pixels[i + 1] = g;
+            pixels[i + 2] = b;
+        }
+
+        Paint(0, 0, 255, 0, 0);
+        Paint(width - 1, 0, 0, 255, 0);
+        Paint(0, height - 1, 0, 0, 255);
+        return pixels;
+    }
+
+    private static string Corners(ImageData image) =>
+        $"tl={Hex(image.GetColor(0, 0))} tr={Hex(image.GetColor(image.Width - 1, 0))} " +
+        $"bl={Hex(image.GetColor(0, image.Height - 1))}";
+
+    private static string Hex(Rgb colour) => $"({colour.R},{colour.G},{colour.B})";
 
     /// <summary>A red subject on a blue field, so the object selector has a clear edge to follow.</summary>
     internal static ImageData SubjectPhoto()

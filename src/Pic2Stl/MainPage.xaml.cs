@@ -1,7 +1,10 @@
+using System.Globalization;
+using Microsoft.Maui.Storage;
 using Pic2Stl.Controls;
 using Pic2Stl.Core.Colours;
 using Pic2Stl.Core.Depth;
 using Pic2Stl.Core.Export;
+using Pic2Stl.Core.Geometry;
 using Pic2Stl.Core.Imaging;
 using Pic2Stl.Core.Pipeline;
 using Pic2Stl.Services;
@@ -18,14 +21,48 @@ public partial class MainPage : ContentPage
 
     private readonly List<PhotoStep> _undo = [];
 
+    /// <summary>What to tell the user when nothing is selected yet; the same line is reused after a redraw.</summary>
+    private const string ObjectHint = "Tap the object you want — its edges become the outline. Drag the outline to add or trim edges.";
+
+    private const string ObjectIdleStatus = "Tap the object you want to keep. Its edges become the outline.";
+
     private LoadedPhoto? _photo;
     private SelectionMask? _keep;
     private PhotoEditMode _editMode;
     private bool _sliderDragging;
+
+    /// <summary>Nudges the user made to the found outline, as strokes in photo fractions.</summary>
+    private readonly List<SelectionStroke> _strokes = [];
+    private ObjectSelection? _previewBase;
+    private ImageData? _previewSource;
+    private SelectionRect _previewBox;
+
+    /// <summary>Where the user tapped to pick an object, in photo fractions; null when the box was drawn.</summary>
+    private PointF? _tapPoint;
     private GenerationResult? _result;
     private string? _threeMfPath;
     private string? _stlPath;
     private bool _busy;
+
+    /// <summary>The colour picker currently covering the page, if any.</summary>
+    private ColourPickerView? _modal;
+
+    /// <summary>The print colours as the user defined them, and the spool names that go with them into the 3MF.</summary>
+    private readonly List<Rgb> _printColours = [];
+    private readonly List<string> _printNames = [];
+    private int _colourCount = 4;
+
+    /// <summary>Where the four user-defined swatches are kept between app launches.</summary>
+    private const string UserColoursPreference = "user-defined-colours";
+
+    /// <summary>The four user-defined swatches in the colour picker, kept between colour edits and app launches.</summary>
+    private readonly Rgb[] _userColours =
+    [
+        new(0xE4, 0x6F, 0xA5),
+        new(0x3F, 0xA8, 0x45),
+        new(0x2D, 0x6B, 0xD8),
+        new(0xF0, 0x7C, 0x22),
+    ];
 
     public MainPage(PhotoDecoder photoDecoder, AiModelInstaller modelInstaller)
     {
@@ -34,7 +71,12 @@ public partial class MainPage : ContentPage
         _photoDecoder = photoDecoder;
         _modelInstaller = modelInstaller;
 
+        LoadUserColours();
+
         Overlay.SelectionChanged += OnSelectionChanged;
+        Overlay.StrokeAdded += OnStrokeAdded;
+        Overlay.RefineEnded += OnRefineEnded;
+        Overlay.Tapped += OnOverlayTapped;
 
 #if DEBUG
         if (Diagnostics.SelfTest.IsRequested)
@@ -144,6 +186,7 @@ public partial class MainPage : ContentPage
 
         PhotoPreview.Source = ImageSource.FromStream(() => new MemoryStream(_photo.PreviewPng));
         EditBar.IsVisible = true;
+        ColoursButton.IsEnabled = true;
         UndoButton.IsVisible = _undo.Count > 0;
         UndoButton.Text = _undo.Count > 0 ? $"Undo {_undo[^1].Label}" : "Undo";
         GenerateButton.IsEnabled = true;
@@ -156,6 +199,7 @@ public partial class MainPage : ContentPage
         _result = null;
         _threeMfPath = null;
         _stlPath = null;
+        SeedPrintColours();
 
         Viewer.Clear();
         ViewerHint.IsVisible = true;
@@ -166,6 +210,9 @@ public partial class MainPage : ContentPage
 
     private void OnSelectionChanged(object? sender, EventArgs e)
     {
+        // A new box invalidates edge nudges that were made for the old one.
+        ClearObjectEdits();
+
         EditorApplyButton.IsEnabled = Overlay.HasSelection;
         UpdateOutlinePreview();
     }
@@ -185,16 +232,16 @@ public partial class MainPage : ContentPage
         EditorTitle.Text = cropping ? "Crop the photo" : "Select an object";
         EditorHint.Text = cropping
             ? "Drag a box around the part you want. The 3D model is built from that area only."
-            : "Drag a box around the object. It is cut from the background and stood on a flat base.";
+            : ObjectHint;
         EditorApplyButton.Text = cropping ? "Crop" : "Use object";
         EditorApplyButton.IsEnabled = false;
         EditorObjectOptions.IsVisible = !cropping;
-        EditorObjectStatus.Text = cropping ? string.Empty : "Drag a box around the object.";
+        EditorObjectStatus.Text = cropping ? string.Empty : ObjectIdleStatus;
 
         EditorImage.Source = ImageSource.FromStream(() => new MemoryStream(_photo.PreviewPng));
         Overlay.Mode = mode;
         Overlay.Start(_photo.Image.Width, _photo.Image.Height);
-        Overlay.SetOutline(null, default);
+        Overlay.SetOutline(null, default, null);
         EditorPanel.IsVisible = true;
     }
 
@@ -203,27 +250,58 @@ public partial class MainPage : ContentPage
         if (_photo is null)
             return;
 
+        ClearObjectEdits();
         Overlay.Start(_photo.Image.Width, _photo.Image.Height);
         EditorApplyButton.IsEnabled = false;
+        if (_editMode == PhotoEditMode.Object)
+            EditorObjectStatus.Text = ObjectIdleStatus;
     }
 
     private void OnEditorCancel(object? sender, EventArgs e)
     {
         EditorPanel.IsVisible = false;
-        Overlay.SetOutline(null, default);
+        ClearObjectEdits();
+        Overlay.SetOutline(null, default, null);
+    }
+
+    /// <summary>Forgets the found object, the tap that picked it and any brush strokes made to it.</summary>
+    private void ClearObjectEdits()
+    {
+        _strokes.Clear();
+        _previewBase = null;
+        _previewSource = null;
+        _tapPoint = null;
     }
 
     /// <summary>
-    /// Shows the object the colour match would keep, computed on a downscaled copy so the strictness slider
-    /// stays responsive while it is dragged. Apply repeats the same match at full resolution.
+    /// A single tap picks the object under the finger: the match is grown from that pixel, so its bounds and
+    /// outline are worked out for the user instead of asking them to draw a box around it.
+    /// </summary>
+    private void OnOverlayTapped(object? sender, PointF point)
+    {
+        if (_photo is null || _editMode != PhotoEditMode.Object)
+            return;
+
+        ClearObjectEdits();
+        _tapPoint = point;
+        UpdateOutlinePreview();
+        EditorApplyButton.IsEnabled = Overlay.HasSelection;
+    }
+
+    /// <summary>
+    /// Shows the object the colour match would keep, computed on a downscaled copy so the strictness slider and
+    /// the edge brush stay responsive. The base match is cached, because brushing repeats it many times a
+    /// second; Apply repeats the same match, plus the strokes, at full resolution.
     /// </summary>
     private void UpdateOutlinePreview()
     {
-        if (_photo is null || _editMode != PhotoEditMode.Object || Overlay.Selection is not { } box)
+        if (_photo is null || _editMode != PhotoEditMode.Object || (_tapPoint is null && !Overlay.HasSelection))
         {
-            Overlay.SetOutline(null, default);
+            _previewBase = null;
+            _previewSource = null;
+            Overlay.SetOutline(null, default, null);
             if (!string.IsNullOrEmpty(EditorObjectStatus.Text))
-                EditorObjectStatus.Text = "Drag a box around the object.";
+                EditorObjectStatus.Text = ObjectIdleStatus;
             return;
         }
 
@@ -235,28 +313,122 @@ public partial class MainPage : ContentPage
                 Math.Max(2, (int)Math.Round(image.Height * scale)))
             : image;
 
-        var rect = SelectionRect.FromFractions(box.X, box.Y, box.Right, box.Bottom, preview.Width, preview.Height);
-        if (rect.Width < 2 || rect.Height < 2)
+        var tolerance = (float)EditorToleranceSlider.Value;
+        ObjectSelection found;
+
+        if (_tapPoint is { } tap)
         {
-            Overlay.SetOutline(null, default);
-            return;
+            found = ObjectSelector.SelectAt(
+                preview,
+                (int)Math.Clamp(tap.X * preview.Width, 0f, preview.Width - 1),
+                (int)Math.Clamp(tap.Y * preview.Height, 0f, preview.Height - 1),
+                tolerance);
+            _previewBox = found.Bounds;
+        }
+        else
+        {
+            var box = Overlay.Selection!.Value;
+            var rect = SelectionRect.FromFractions(box.X, box.Y, box.Right, box.Bottom, preview.Width, preview.Height);
+            if (rect.Width < 2 || rect.Height < 2)
+            {
+                _previewBase = null;
+                _previewSource = null;
+                Overlay.SetOutline(null, default, null);
+                return;
+            }
+
+            _previewBox = rect;
+            found = ObjectSelector.Select(preview, rect, tolerance);
         }
 
-        var selection = ObjectSelector.Select(preview, rect, (float)EditorToleranceSlider.Value);
+        _previewSource = preview;
+        _previewBase = found;
+
+        var selection = ObjectSelector.Refine(found, preview.Width, preview.Height, _strokes);
+        ShowSelection(selection, withTint: true);
+
+        // The tap already worked out where the object is, so the overlay is simply told the box it covers. That
+        // gives Apply something to act on without pretending the user dragged a box around it.
+        if (_tapPoint is not null)
+            Overlay.SetBox(Fractions(selection.Bounds, preview));
+    }
+
+    private static RectF Fractions(SelectionRect bounds, ImageData image) => new(
+        (float)bounds.X / image.Width,
+        (float)bounds.Y / image.Height,
+        (float)bounds.Width / image.Width,
+        (float)bounds.Height / image.Height);
+
+    /// <summary>Draws the selection over the photo; the tint is left out while the edge is being dragged.</summary>
+    private void ShowSelection(ObjectSelection selection, bool withTint)
+    {
+        var preview = _previewSource;
+        if (preview is null)
+            return;
+
         var bounds = new RectF(
             (float)selection.Bounds.X / preview.Width,
             (float)selection.Bounds.Y / preview.Height,
             (float)selection.Bounds.Width / preview.Width,
             (float)selection.Bounds.Height / preview.Height);
 
-        // The tint is a preview only, so it is drawn at the same reduced size it was matched at.
-        Overlay.SetOutline(PngEncoder.Encode(selection.Mask.Tint(new Rgb(0x4A, 0xDE, 0xA9), 80)), bounds);
+        // The tint is a preview only, so it is drawn at the same reduced size it was matched at, and re-encoding
+        // it on every brush stroke would make the drag stutter.
+        byte[]? tint = withTint
+            ? PngEncoder.Encode(selection.Mask.Tint(new Rgb(0x4A, 0xDE, 0xA9), 80))
+            : null;
 
-        // Measured against the box the user drew, so every step of the slider gives a bigger number.
-        var kept = selection.Mask.KeptCount / (float)(rect.Width * rect.Height);
+        Overlay.SetOutline(tint, bounds, Edges(selection, preview), selection.Mask);
+
+        // Measured against the box the user drew, or the area their tap covered, so every step of the slider
+        // gives a bigger number.
+        var kept = selection.Mask.KeptCount / (float)(_previewBox.Width * _previewBox.Height);
+        var area = _tapPoint is null ? "the box" : "the tapped area";
         EditorObjectStatus.Text = selection.Mask.IsEverything
-            ? "No separate object found — the whole box will be used."
-            : $"Keeps {kept:P0} of the box.";
+            ? "No separate object found here — tap directly on the object, or drag its outline to cut background away."
+            : $"Keeps {kept:P0} of {area} · drag the outline to add or trim edges.";
+    }
+
+    /// <summary>Adds one brush stroke to the object and redraws the outline it produces.</summary>
+    private void OnStrokeAdded(object? sender, SelectionStroke stroke)
+    {
+        if (_previewBase is null || _previewSource is null)
+            return;
+
+        _strokes.Add(stroke);
+        ShowSelection(
+            ObjectSelector.Refine(_previewBase, _previewSource.Width, _previewSource.Height, _strokes),
+            withTint: false);
+    }
+
+    /// <summary>The drag is over, so the full preview (tint included) can be drawn again.</summary>
+    private void OnRefineEnded(object? sender, EventArgs e)
+    {
+        if (_previewBase is null || _previewSource is null)
+            return;
+
+        ShowSelection(
+            ObjectSelector.Refine(_previewBase, _previewSource.Width, _previewSource.Height, _strokes),
+            withTint: true);
+    }
+
+    /// <summary>The found object's edge as line segments in photo fractions, for the overlay to draw.</summary>
+    private static float[] Edges(ObjectSelection selection, ImageData preview)
+    {
+        var outline = selection.Mask.Outline();
+        var edges = new float[outline.Count * 4];
+        var bounds = selection.Bounds;
+
+        for (var i = 0; i < outline.Count; i++)
+        {
+            var (x0, y0, x1, y1) = outline[i];
+            edges[i * 4] = (bounds.X + x0) / preview.Width;
+            edges[i * 4 + 1] = (bounds.Y + y0) / preview.Height;
+            edges[i * 4 + 2] = (bounds.X + x1) / preview.Width;
+            edges[i * 4 + 3] = (bounds.Y + y1) / preview.Height;
+        }
+
+        return edges;
     }
 
     private void OnToleranceDragStarted(object? sender, EventArgs e) => _sliderDragging = true;
@@ -286,7 +458,9 @@ public partial class MainPage : ContentPage
 
         if (rect.Width < 2 || rect.Height < 2)
         {
-            EditorHint.Text = "That box is too small — drag a bigger one.";
+            EditorHint.Text = _tapPoint is null
+                ? "That box is too small — drag a bigger one."
+                : "That area is too small — tap a bigger object.";
             return;
         }
 
@@ -299,7 +473,18 @@ public partial class MainPage : ContentPage
         }
         else
         {
-            var selection = ObjectSelector.Select(image, rect, (float)EditorToleranceSlider.Value);
+            // A tap is repeated at full resolution from the same pixel, so Apply matches what the preview showed.
+            ObjectSelection selection;
+            if (_tapPoint is { } tap)
+                selection = ObjectSelector.SelectAt(
+                    image,
+                    (int)Math.Clamp(tap.X * image.Width, 0f, image.Width - 1),
+                    (int)Math.Clamp(tap.Y * image.Height, 0f, image.Height - 1),
+                    (float)EditorToleranceSlider.Value);
+            else
+                selection = ObjectSelector.Select(image, rect, (float)EditorToleranceSlider.Value);
+
+            selection = ObjectSelector.Refine(selection, image.Width, image.Height, _strokes);
             edited = image.Crop(selection.Bounds);
 
             // A mask that keeps every pixel is the same as having no mask at all.
@@ -311,7 +496,8 @@ public partial class MainPage : ContentPage
         _photo = new LoadedPhoto(edited, PngEncoder.Encode(edited));
         _keep = keep;
         EditorPanel.IsVisible = false;
-        Overlay.SetOutline(null, default);
+        ClearObjectEdits();
+        Overlay.SetOutline(null, default, null);
 
         ShowPhoto();
         ResetResult();
@@ -348,6 +534,270 @@ public partial class MainPage : ContentPage
         WidthLabel.Text = $"{e.NewValue:0} mm";
     }
 
+    private void OnFewerColours(object? sender, EventArgs e) => SetColourCount(_colourCount - 1);
+
+    private void OnMoreColours(object? sender, EventArgs e) => SetColourCount(_colourCount + 1);
+
+    private void SetColourCount(int count)
+    {
+        count = Math.Clamp(count, 1, 16);
+        if (count == _colourCount)
+            return;
+
+        _colourCount = count;
+        ColourCountLabel.Text = count.ToString(CultureInfo.InvariantCulture);
+        ColourCountDown.IsEnabled = count > 1;
+        ColourCountUp.IsEnabled = count < 16;
+
+        // The palette and the material map both depend on the count, so the current model no longer matches.
+        ResetResult();
+    }
+
+    /// <summary>
+    /// Fills the print colours from the photo itself, as a starting point the user can rename or replace before
+    /// generating. Names already given to earlier colours are kept, including across regenerations.
+    /// </summary>
+    private void SeedPrintColours()
+    {
+        if (_photo is null)
+        {
+            _printColours.Clear();
+            _printNames.Clear();
+            ColourChips.Children.Clear();
+            PaletteRows.Children.Clear();
+            PrintColoursRow.IsVisible = false;
+            PaletteLayer.IsVisible = false;
+            return;
+        }
+
+        var image = _photo.Image;
+        var scale = Math.Min(1.0, 200.0 / Math.Max(image.Width, image.Height));
+        var sample = scale < 1
+            ? image.ResampleTo(
+                Math.Max(2, (int)Math.Round(image.Width * scale)),
+                Math.Max(2, (int)Math.Round(image.Height * scale)))
+            : image;
+
+        var chosen = PaletteBuilder.Build(sample, _colourCount).Palette.Colours;
+        var names = new List<string>(_printNames);
+
+        _printColours.Clear();
+        _printColours.AddRange(chosen);
+        _printNames.Clear();
+
+        for (var i = 0; i < _printColours.Count; i++)
+            _printNames.Add(i < names.Count ? names[i] : DefaultColourName(i));
+
+        BuildColourChips();
+        PrintColoursRow.IsVisible = true;
+    }
+
+    private static string DefaultColourName(int index) => $"Colour {index + 1}";
+
+    /// <summary>One tappable swatch per print colour; its label is the name that goes into the 3MF.</summary>
+    private void BuildColourChips()
+    {
+        ColourChips.Children.Clear();
+
+        for (var i = 0; i < _printColours.Count; i++)
+        {
+            var index = i;
+
+            var swatch = new Border
+            {
+                WidthRequest = 34,
+                HeightRequest = 34,
+                Stroke = Color.FromArgb("#242C42"),
+                StrokeThickness = 1,
+                StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 8 },
+                BackgroundColor = ToColour(_printColours[i]),
+            };
+
+            var name = new Label
+            {
+                Text = _printNames[i],
+                FontSize = 9,
+                TextColor = Color.FromArgb("#8C97B5"),
+                HorizontalTextAlignment = TextAlignment.Center,
+                LineBreakMode = LineBreakMode.TailTruncation,
+                WidthRequest = 52,
+            };
+
+            var cell = new VerticalStackLayout { Spacing = 3, Children = { swatch, name } };
+            var tap = new TapGestureRecognizer();
+            tap.Tapped += (_, _) => OpenColourEditor(index);
+            cell.GestureRecognizers.Add(tap);
+            ColourChips.Children.Add(cell);
+        }
+    }
+
+    private void OnColoursClicked(object? sender, EventArgs e)
+    {
+        if (_printColours.Count == 0)
+            return;
+
+        BuildPaletteRows();
+        PaletteLayer.IsVisible = true;
+    }
+
+    private void OnPaletteDone(object? sender, EventArgs e) => PaletteLayer.IsVisible = false;
+
+    /// <summary>One row per print colour: the swatch and its name, with the whole row opening the picker.</summary>
+    private void BuildPaletteRows()
+    {
+        PaletteRows.Children.Clear();
+
+        for (var i = 0; i < _printColours.Count; i++)
+        {
+            var index = i;
+
+            var swatch = new Border
+            {
+                WidthRequest = 30,
+                HeightRequest = 30,
+                BackgroundColor = ToColour(_printColours[i]),
+                Stroke = Color.FromArgb("#242C42"),
+                StrokeThickness = 1,
+                StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 8 },
+                VerticalOptions = LayoutOptions.Center,
+            };
+
+            var name = new Label
+            {
+                Text = _printNames[i],
+                FontSize = 14,
+                TextColor = Color.FromArgb("#DCE4FF"),
+                VerticalOptions = LayoutOptions.Center,
+                LineBreakMode = LineBreakMode.TailTruncation,
+            };
+
+            var code = new Label
+            {
+                Text = Hex(_printColours[i]),
+                FontSize = 11,
+                TextColor = Color.FromArgb("#8C97B5"),
+                VerticalOptions = LayoutOptions.Center,
+            };
+
+            var grid = new Grid
+            {
+                ColumnSpacing = 10,
+                ColumnDefinitions =
+                {
+                    new ColumnDefinition(GridLength.Auto),
+                    new ColumnDefinition(GridLength.Star),
+                    new ColumnDefinition(GridLength.Auto),
+                },
+            };
+
+            grid.Add(swatch);
+            grid.Add(name, 1);
+            grid.Add(code, 2);
+
+            var row = new Border
+            {
+                BackgroundColor = Color.FromArgb("#0E1220"),
+                Stroke = Color.FromArgb("#242C42"),
+                StrokeThickness = 1,
+                StrokeShape = new Microsoft.Maui.Controls.Shapes.RoundRectangle { CornerRadius = 10 },
+                Padding = new Thickness(10, 8),
+                Content = grid,
+            };
+
+            var tap = new TapGestureRecognizer();
+            tap.Tapped += (_, _) => OpenColourEditor(index);
+            row.GestureRecognizers.Add(tap);
+            PaletteRows.Children.Add(row);
+        }
+    }
+
+    /// <summary>Opens the preset and custom-shade picker as a modal card, then keeps what the user applies.</summary>
+    private async void OpenColourEditor(int index)
+    {
+        if (index < 0 || index >= _printColours.Count || _modal is not null)
+            return;
+
+        var picker = new ColourPickerView(index + 1, _printColours[index], _printNames[index], _userColours);
+
+        _modal = picker;
+        ModalLayer.Children.Add(picker);
+        ModalLayer.IsVisible = true;
+        await picker.AnimateInAsync();
+
+        var choice = await picker.Result;
+
+        _modal = null;
+        await picker.AnimateOutAsync();
+        ModalLayer.Children.Clear();
+        ModalLayer.IsVisible = false;
+
+        if (choice is null)
+            return;
+
+        _printColours[index] = choice.Colour;
+        _printNames[index] = choice.Name;
+
+        for (var i = 0; i < _userColours.Length && i < choice.UserColours.Count; i++)
+            _userColours[i] = choice.UserColours[i];
+
+        SaveUserColours();
+        BuildColourChips();
+        if (PaletteLayer.IsVisible)
+            BuildPaletteRows();
+
+        if (_result is not null)
+            Viewer.UpdatePalette(_printColours);
+    }
+
+    /// <summary>The system back button closes the picker or the palette rather than leaving the app.</summary>
+    protected override bool OnBackButtonPressed()
+    {
+        if (_modal is not null)
+        {
+            _modal.Cancel();
+            return true;
+        }
+
+        if (PaletteLayer.IsVisible)
+        {
+            PaletteLayer.IsVisible = false;
+            return true;
+        }
+
+        return base.OnBackButtonPressed();
+    }
+
+    /// <summary>Restores the four swatches the user defined last time; unreadable entries keep their default.</summary>
+    private void LoadUserColours()
+    {
+        var parts = Preferences.Default
+            .Get(UserColoursPreference, string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries);
+
+        for (var i = 0; i < _userColours.Length; i++)
+            if (i < parts.Length && TryParseHex(parts[i], out var colour))
+                _userColours[i] = colour;
+    }
+
+    private void SaveUserColours() =>
+        Preferences.Default.Set(UserColoursPreference, string.Join(",", _userColours.Select(Hex)));
+
+    private static string Hex(Rgb colour) => $"{colour.R:X2}{colour.G:X2}{colour.B:X2}";
+
+    private static bool TryParseHex(string text, out Rgb colour)
+    {
+        colour = default;
+
+        if (text.Length != 6 ||
+            !uint.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var value))
+            return false;
+
+        colour = new Rgb((byte)(value >> 16), (byte)(value >> 8), (byte)value);
+        return true;
+    }
+
+    private static Color ToColour(Rgb colour) => Color.FromRgb(colour.R, colour.G, colour.B);
+
     private async void OnGenerateClicked(object? sender, EventArgs e)
     {
         if (_photo is null || _busy)
@@ -374,7 +824,8 @@ public partial class MainPage : ContentPage
             var pipeline = new MeshGenerationPipeline(estimator);
             var options = new GenerationOptions
             {
-                ColourCount = ColourSwitch.IsToggled ? 16 : 4,
+                ColourCount = _colourCount,
+                Palette = _printColours.Count > 0 ? _printColours.ToArray() : null,
                 WidthMm = (float)WidthSlider.Value,
                 ExportDetail = 220,
                 PreviewDetail = 40,
@@ -445,7 +896,7 @@ public partial class MainPage : ContentPage
         var threeMf = Path.Combine(directory, $"pic2stl-{stamp}.3mf");
         var stl = Path.Combine(directory, $"pic2stl-{stamp}.stl");
 
-        var palette = result.Palette.Colours;
+        var palette = _printColours.Count > 0 ? _printColours : result.Palette.Colours;
         var mesh = result.Mesh;
 
         await Task.Run(() =>
@@ -454,7 +905,7 @@ public partial class MainPage : ContentPage
                 ThreeMfWriter.Write(stream, mesh, palette, "Pic2Stl model");
 
             using (var stream = File.Create(stl))
-                StlWriter.Write(stream, mesh, "Pic2Stl model");
+                StlWriter.Write(stream, result.Mesh, "Pic2Stl model");
         });
 
         _threeMfPath = threeMf;
@@ -463,12 +914,13 @@ public partial class MainPage : ContentPage
 
     private void ShowResult(GenerationResult result)
     {
-        Viewer.SetMesh(result.PreviewMesh, result.Palette.Colours);
+        var palette = _printColours.Count > 0 ? _printColours : result.Palette.Colours;
+        Viewer.SetMesh(result.PreviewMesh, palette);
         ViewerHint.IsVisible = false;
 
         var (min, max) = result.Mesh.Bounds();
         StatsLabel.Text =
-            $"{result.TriangleCount:N0} triangles · {result.Palette.Count} colours · " +
+            $"{result.TriangleCount:N0} triangles · {palette.Count} colours · " +
             $"{max.X - min.X:0}×{max.Y - min.Y:0}×{max.Z - min.Z:0} mm · " +
             $"{result.EngineName} · {result.Elapsed.TotalSeconds:0.0}s";
         StatsLabel.IsVisible = true;
@@ -479,7 +931,23 @@ public partial class MainPage : ContentPage
         SetProgress(100, "Model ready");
     }
 
-    private async void OnShareThreeMf(object? sender, EventArgs e) => await ShareAsync(_threeMfPath, "Share 3MF");
+    private async void OnShareThreeMf(object? sender, EventArgs e)
+    {
+        // Written at share time so the file carries the colours as the user last defined them.
+        if (_result is not null && _threeMfPath is { } path)
+        {
+            var mesh = _result.Mesh;
+            var palette = _printColours.Count > 0 ? _printColours : _result.Palette.Colours;
+
+            await Task.Run(() =>
+            {
+                using var stream = File.Create(path);
+                ThreeMfWriter.Write(stream, mesh, palette, "Pic2Stl model");
+            });
+        }
+
+        await ShareAsync(_threeMfPath, "Share 3MF");
+    }
 
     private async void OnShareStl(object? sender, EventArgs e) => await ShareAsync(_stlPath, "Share STL");
 
